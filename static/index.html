@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MD_CREATOR — Universal Markdown Converter</title>
+  <meta name="description" content="Convert any file to Markdown instantly. PDF, Word, Excel, PowerPoint, HTML, images, and more. Powered by Microsoft MarkItDown.">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="header" id="header">
+      <div class="header-brand">
+        <div class="header-logo">M</div>
+        <div>
+          <div class="header-title"><span>MD_CREATOR</span></div>
+          <div class="header-subtitle">Universal Markdown Converter</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button class="btn-history" id="btn-history" title="Conversion History">
+          🕐 <span>History</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main -->
+    <main class="main">
+      <!-- Hero -->
+      <section class="hero" id="hero-section">
+        <h1>Convert <span class="gradient">anything</span> to Markdown</h1>
+        <p>Drop any file — PDF, Word, Excel, PowerPoint, HTML, images, audio, and more. Get clean Markdown in seconds.</p>
+        <div class="format-badges" id="format-badges"></div>
+      </section>
+
+      <!-- Drop Zone -->
+      <div class="drop-zone" id="drop-zone">
+        <span class="drop-zone-icon">📂</span>
+        <div class="drop-zone-text">Drag & drop your file here</div>
+        <div class="drop-zone-hint">or <span id="browse-trigger">browse files</span> — up to 50MB</div>
+        <input type="file" id="file-input">
+      </div>
+
+      <!-- Converting Spinner -->
+      <div class="converting" id="converting">
+        <div class="spinner"></div>
+        <div class="converting-text">Converting to Markdown...</div>
+        <div class="converting-file" id="converting-filename"></div>
+      </div>
+
+      <!-- Results -->
+      <section class="results" id="results">
+        <div class="results-header">
+          <div class="results-meta">
+            <span class="results-filename" id="results-filename"></span>
+            <span class="results-stat" id="results-size"></span>
+            <span class="results-stat" id="results-time"></span>
+            <span class="results-stat" id="results-chars"></span>
+          </div>
+          <div class="results-actions">
+            <button class="btn btn-accent" id="btn-copy">📋 Copy</button>
+            <button class="btn btn-primary" id="btn-download">💾 Download .md</button>
+            <button class="btn btn-secondary" id="btn-new">⚡ Convert Another</button>
+          </div>
+        </div>
+
+        <!-- Tab Bar -->
+        <div class="tab-bar">
+          <button class="tab active" data-tab="split" id="tab-split">Split View</button>
+          <button class="tab" data-tab="raw" id="tab-raw">Raw Markdown</button>
+          <button class="tab" data-tab="preview" id="tab-preview">Preview</button>
+        </div>
+
+        <!-- Editor -->
+        <div class="editor-container" id="editor-container">
+          <div class="editor-pane" id="pane-raw">
+            <div class="pane-header">
+              <span>📝 Raw Markdown</span>
+              <span id="line-count"></span>
+            </div>
+            <div class="pane-content raw" id="markdown-raw"></div>
+          </div>
+          <div class="editor-pane" id="pane-preview">
+            <div class="pane-header">
+              <span>👁️ Preview</span>
+            </div>
+            <div class="pane-content preview" id="markdown-preview"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- History Sidebar -->
+  <div class="history-overlay" id="history-overlay">
+    <div class="history-panel">
+      <div class="history-header">
+        <h3>📜 Conversion History</h3>
+        <button class="history-close" id="history-close">✕</button>
+      </div>
+      <div class="history-list" id="history-list"></div>
+      <div class="history-clear">
+        <button class="btn btn-secondary" id="btn-clear-history" style="width:100%;justify-content:center;">🗑️ Clear History</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- markdown-it CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
