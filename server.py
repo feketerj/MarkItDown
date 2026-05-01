@@ -1,6 +1,6 @@
 """
 MD_CREATOR — Universal Markdown Converter
-FastAPI backend powered by Microsoft MarkItDown
+FastAPI backend powered by Microsoft MarkItDown + MinerU
 """
 
 import os
@@ -9,12 +9,19 @@ import tempfile
 import traceback
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from markitdown import MarkItDown
+
+# MinerU cloud SDK (optional — graceful if unavailable)
+try:
+    from mineru import MinerU
+    MINERU_AVAILABLE = True
+except ImportError:
+    MINERU_AVAILABLE = False
 
 # ── App Setup ──────────────────────────────────────────────────────────────────
 
@@ -33,6 +40,29 @@ app.add_middleware(
 
 # MarkItDown engine — singleton
 md_engine = MarkItDown()
+
+# MinerU engine — cloud SDK (no token = flash_extract mode)
+mineru_client = MinerU() if MINERU_AVAILABLE else None
+
+# Engine metadata
+ENGINES = [
+    {
+        "id": "standard",
+        "name": "Standard",
+        "description": "Fast, broad format support (25+ types)",
+        "provider": "Microsoft MarkItDown",
+        "badge": "All Formats",
+    },
+    {
+        "id": "academic",
+        "name": "Academic",
+        "description": "High-fidelity PDF parsing (math, tables, layouts)",
+        "provider": "MinerU (OpenDataLab)",
+        "badge": "PDF Expert",
+        "available": MINERU_AVAILABLE,
+        "note": "Cloud-processed. 10MB / 20 page limit (flash mode).",
+    },
+]
 
 # Max upload size: 50 MB
 MAX_FILE_SIZE = 50 * 1024 * 1024
@@ -75,11 +105,20 @@ async def get_formats():
     return JSONResponse(content={"formats": SUPPORTED_FORMATS})
 
 
+@app.get("/api/engines")
+async def get_engines():
+    """Return list of available conversion engines."""
+    return JSONResponse(content={"engines": ENGINES})
+
+
 @app.post("/api/convert")
-async def convert_file(file: UploadFile = File(...)):
+async def convert_file(
+    file: UploadFile = File(...),
+    engine: str = Form("standard"),
+):
     """
-    Convert an uploaded file to Markdown using MarkItDown.
-    Returns JSON with the markdown content and metadata.
+    Convert an uploaded file to Markdown.
+    Engine: 'standard' (MarkItDown) or 'academic' (MinerU).
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
@@ -97,7 +136,7 @@ async def convert_file(file: UploadFile = File(...)):
     # Detect extension
     ext = Path(file.filename).suffix.lower()
 
-    # Write to temp file (MarkItDown needs a file path)
+    # Write to temp file
     tmp_path = None
     try:
         start_time = time.time()
@@ -108,24 +147,54 @@ async def convert_file(file: UploadFile = File(...)):
             tmp.write(content)
             tmp_path = tmp.name
 
-        # Convert with MarkItDown
-        result = md_engine.convert(tmp_path)
+        engine_used = engine
+        fallback_warning = None
+
+        # ── Academic engine (MinerU) ──
+        if engine == "academic" and MINERU_AVAILABLE and ext == ".pdf":
+            try:
+                mineru_result = mineru_client.flash_extract(tmp_path)
+                markdown_text = mineru_result.markdown or ""
+            except Exception as mineru_err:
+                # Fallback to MarkItDown
+                traceback.print_exc()
+                result = md_engine.convert(tmp_path)
+                markdown_text = result.text_content or ""
+                engine_used = "standard"
+                fallback_warning = f"MinerU failed ({str(mineru_err)[:80]}), fell back to Standard."
+
+        # ── Academic requested but not available or not PDF ──
+        elif engine == "academic":
+            if not MINERU_AVAILABLE:
+                fallback_warning = "MinerU not available, using Standard engine."
+            elif ext != ".pdf":
+                fallback_warning = "Academic engine only supports PDF. Using Standard."
+            result = md_engine.convert(tmp_path)
+            markdown_text = result.text_content or ""
+            engine_used = "standard"
+
+        # ── Standard engine (MarkItDown) ──
+        else:
+            result = md_engine.convert(tmp_path)
+            markdown_text = result.text_content or ""
+
         elapsed = round(time.time() - start_time, 2)
 
-        markdown_text = result.text_content or ""
-
         # Build response
-        return JSONResponse(
-            content={
-                "success": True,
-                "filename": file.filename,
-                "extension": ext,
-                "file_size": len(content),
-                "markdown": markdown_text,
-                "markdown_length": len(markdown_text),
-                "conversion_time": elapsed,
-            }
-        )
+        response_data = {
+            "success": True,
+            "filename": file.filename,
+            "extension": ext,
+            "file_size": len(content),
+            "markdown": markdown_text,
+            "markdown_length": len(markdown_text),
+            "conversion_time": elapsed,
+            "engine": engine_used,
+        }
+        if fallback_warning:
+            response_data["warning"] = fallback_warning
+
+        return JSONResponse(content=response_data)
 
     except Exception as e:
         traceback.print_exc()

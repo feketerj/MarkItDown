@@ -146,6 +146,34 @@ body::before {
 .drop-zone-hint span { color: var(--accent); font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 #file-input { display: none; }
 
+/* ── Engine Selector ── */
+.engine-selector {
+  display: flex; gap: 8px; justify-content: center; margin-bottom: 24px;
+}
+.engine-option {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 16px 28px; border-radius: var(--radius-lg);
+  background: var(--glass); border: 2px solid var(--glass-border);
+  transition: var(--transition); cursor: pointer; min-width: 160px;
+}
+.engine-option:hover { border-color: rgba(255,255,255,0.15); background: var(--glass-hover); transform: translateY(-1px); }
+.engine-option.active {
+  border-color: var(--primary); background: rgba(124, 77, 255, 0.1);
+  box-shadow: 0 0 20px rgba(124, 77, 255, 0.15);
+}
+.engine-option.active .engine-label { color: var(--text-primary); }
+.engine-icon { font-size: 1.4rem; }
+.engine-label { font-size: 0.85rem; font-weight: 700; color: var(--text-secondary); }
+.engine-desc { font-size: 0.65rem; color: var(--text-muted); white-space: nowrap; }
+
+/* ── Engine Badge (results) ── */
+.engine-badge {
+  font-size: 0.7rem; font-weight: 700; padding: 3px 10px;
+  border-radius: 20px; text-transform: uppercase; letter-spacing: 0.04em;
+}
+.engine-badge.standard { background: rgba(124, 77, 255, 0.15); color: var(--primary-glow); border: 1px solid rgba(124, 77, 255, 0.3); }
+.engine-badge.academic { background: rgba(0, 230, 180, 0.12); color: var(--accent); border: 1px solid rgba(0, 230, 180, 0.25); }
+
 /* ── Converting State ── */
 .converting {
   display: none; flex-direction: column; align-items: center; gap: 20px;

@@ -15,6 +15,7 @@
   // ── State ──
   let currentMarkdown = '';
   let currentFilename = '';
+  let selectedEngine = 'standard';
 
   // ── markdown-it instance ──
   const mdit = window.markdownit({
@@ -49,10 +50,22 @@
   // ── Init ──
   function init() {
     loadFormats();
+    setupEngineSelector();
     setupDragDrop();
     setupButtons();
     setupTabs();
     setupHistory();
+  }
+
+  // ── Engine Selector ──
+  function setupEngineSelector() {
+    document.querySelectorAll('.engine-option').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.engine-option').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        selectedEngine = btn.dataset.engine;
+      });
+    });
   }
 
   // ── Format Badges ──
@@ -110,6 +123,7 @@
 
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('engine', selectedEngine);
 
     try {
       const res = await fetch(API_CONVERT, { method: 'POST', body: formData });
@@ -135,6 +149,7 @@
   function showConverting(filename) {
     dropZone.style.display = 'none';
     heroSection.style.display = 'none';
+    $('#engine-selector').style.display = 'none';
     convertingEl.classList.add('active');
     resultsEl.classList.remove('active');
     convertingFilename.textContent = filename;
@@ -146,8 +161,23 @@
 
     resultsFilename.textContent = data.filename;
     resultsSize.textContent = formatBytes(data.file_size);
-    resultsTime.textContent = `⚡ ${data.conversion_time}s`;
+    resultsTime.textContent = `\u26A1 ${data.conversion_time}s`;
     resultsChars.textContent = `${data.markdown_length.toLocaleString()} chars`;
+
+    // Engine badge
+    const eng = data.engine || 'standard';
+    const engLabel = eng === 'academic' ? 'Academic' : 'Standard';
+    const existingBadge = document.querySelector('.engine-badge');
+    if (existingBadge) existingBadge.remove();
+    const badge = document.createElement('span');
+    badge.className = `engine-badge ${eng}`;
+    badge.textContent = engLabel;
+    resultsFilename.parentNode.insertBefore(badge, resultsSize);
+
+    // Fallback warning
+    if (data.warning) {
+      showToast(data.warning, 'error');
+    }
 
     rawPane.textContent = data.markdown;
     previewPane.innerHTML = mdit.render(data.markdown);
@@ -161,6 +191,7 @@
     resultsEl.classList.remove('active');
     heroSection.style.display = '';
     dropZone.style.display = '';
+    $('#engine-selector').style.display = '';
   }
 
   // ── Buttons ──
