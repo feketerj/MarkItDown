@@ -28,6 +28,11 @@ desktop.ini
 # Temp files
 mdcreator_*
 *.tmp
+.deps_installed
+.server.pid
+.server.log
+.server.err.log
+.start.lock/
 
 # Environment
 .env

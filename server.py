@@ -9,7 +9,7 @@ import tempfile
 import traceback
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,15 +25,24 @@ except ImportError:
 
 # ── App Setup ──────────────────────────────────────────────────────────────────
 
+APP_NAME = os.getenv("APP_NAME") or Path(__file__).resolve().parent.name
+APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
+APP_PORT = int(os.getenv("APP_PORT", "8000"))
+APP_RELOAD = os.getenv("APP_RELOAD", os.getenv("MD_CREATOR_RELOAD", "0")) == "1"
+
 app = FastAPI(
-    title="MD_CREATOR",
+    title=APP_NAME,
     description="Universal Markdown Converter — convert any file to Markdown",
     version="1.0.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        f"http://{APP_HOST}:{APP_PORT}",
+        f"http://127.0.0.1:{APP_PORT}",
+        f"http://localhost:{APP_PORT}",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -42,7 +51,12 @@ app.add_middleware(
 md_engine = MarkItDown()
 
 # MinerU engine — cloud SDK (no token = flash_extract mode)
-mineru_client = MinerU() if MINERU_AVAILABLE else None
+try:
+    mineru_client = MinerU() if MINERU_AVAILABLE else None
+except Exception:
+    traceback.print_exc()
+    MINERU_AVAILABLE = False
+    mineru_client = None
 
 # Engine metadata
 ENGINES = [
@@ -66,6 +80,8 @@ ENGINES = [
 
 # Max upload size: 50 MB
 MAX_FILE_SIZE = 50 * 1024 * 1024
+MAX_REQUEST_SIZE = MAX_FILE_SIZE + (1024 * 1024)
+UPLOAD_CHUNK_SIZE = 1024 * 1024
 
 # Supported formats metadata
 SUPPORTED_FORMATS = [
@@ -105,6 +121,24 @@ async def get_formats():
     return JSONResponse(content={"formats": SUPPORTED_FORMATS})
 
 
+@app.get("/api/health")
+async def get_health():
+    """Return local health and launch metadata."""
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "app_name": APP_NAME,
+            "host": APP_HOST,
+            "port": APP_PORT,
+            "engines": {
+                "standard": True,
+                "academic": MINERU_AVAILABLE,
+            },
+            "mineru_available": MINERU_AVAILABLE,
+        }
+    )
+
+
 @app.get("/api/engines")
 async def get_engines():
     """Return list of available conversion engines."""
@@ -113,6 +147,7 @@ async def get_engines():
 
 @app.post("/api/convert")
 async def convert_file(
+    request: Request,
     file: UploadFile = File(...),
     engine: str = Form("standard"),
 ):
@@ -123,15 +158,16 @@ async def convert_file(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
-    # Read file content
-    content = await file.read()
-
-    # Check file size
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB",
-        )
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Request too large. Maximum file size is {MAX_FILE_SIZE // (1024*1024)}MB",
+                )
+        except ValueError:
+            pass
 
     # Detect extension
     ext = Path(file.filename).suffix.lower()
@@ -141,17 +177,26 @@ async def convert_file(
     try:
         start_time = time.time()
 
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=ext, prefix="mdcreator_"
-        ) as tmp:
-            tmp.write(content)
+        total_size = 0
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext, prefix="mdcreator_") as tmp:
             tmp_path = tmp.name
+            while True:
+                chunk = await file.read(UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > MAX_FILE_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB",
+                    )
+                tmp.write(chunk)
 
-        engine_used = engine
+        engine_used = engine if engine in {"standard", "academic"} else "standard"
         fallback_warning = None
 
         # ── Academic engine (MinerU) ──
-        if engine == "academic" and MINERU_AVAILABLE and ext == ".pdf":
+        if engine_used == "academic" and MINERU_AVAILABLE and ext == ".pdf":
             try:
                 mineru_result = mineru_client.flash_extract(tmp_path)
                 markdown_text = mineru_result.markdown or ""
@@ -164,7 +209,7 @@ async def convert_file(
                 fallback_warning = f"MinerU failed ({str(mineru_err)[:80]}), fell back to Standard."
 
         # ── Academic requested but not available or not PDF ──
-        elif engine == "academic":
+        elif engine_used == "academic":
             if not MINERU_AVAILABLE:
                 fallback_warning = "MinerU not available, using Standard engine."
             elif ext != ".pdf":
@@ -185,7 +230,7 @@ async def convert_file(
             "success": True,
             "filename": file.filename,
             "extension": ext,
-            "file_size": len(content),
+            "file_size": total_size,
             "markdown": markdown_text,
             "markdown_length": len(markdown_text),
             "conversion_time": elapsed,
@@ -195,6 +240,9 @@ async def convert_file(
             response_data["warning"] = fallback_warning
 
         return JSONResponse(content=response_data)
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         traceback.print_exc()
@@ -234,5 +282,5 @@ async def serve_frontend():
 if __name__ == "__main__":
     import uvicorn
 
-    print("\n>>> MD_CREATOR starting on http://localhost:8000\n")
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    print(f"\n>>> {APP_NAME} starting on http://{APP_HOST}:{APP_PORT}\n")
+    uvicorn.run("server:app", host=APP_HOST, port=APP_PORT, reload=APP_RELOAD)

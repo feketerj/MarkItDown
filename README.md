@@ -85,8 +85,8 @@ FastAPI Server (server.py)
 - **No database** — All state is client-side (localStorage). Server is stateless.
 - **Temp file cleanup** — Guaranteed via `try/finally` block. Files are never persisted.
 - **50MB limit** — Enforced both client-side (pre-upload check) and server-side (post-read check).
-- **CORS enabled** — `allow_origins=["*"]` for development flexibility.
-- **Hot reload** — Uvicorn runs with `reload=True` for development.
+- **Local-only by default** — Launchers bind to `127.0.0.1` and use a fixed app port.
+- **Hot reload opt-in** — Set `APP_RELOAD=1` before running `python server.py`.
 
 ---
 
@@ -107,11 +107,11 @@ pip install -r requirements.txt
 
 ### Run
 
-```bash
-python server.py
+```bat
+start.bat
 ```
 
-Open **http://localhost:8000** in your browser.
+Open **http://127.0.0.1:8000** in your browser. Use `stop.bat` to close the background server.
 
 ### Usage
 
