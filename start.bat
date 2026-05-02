@@ -30,8 +30,12 @@ echo.
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$url=$env:APP_URL + '/api/health'; $name=$env:APP_NAME; try { $h=Invoke-RestMethod -Uri $url -TimeoutSec 2; if($h.status -eq 'ok' -and $h.app_name -eq $name){ exit 0 } } catch {}; exit 1"
 if not errorlevel 1 (
-    echo [OK] %APP_NAME% is already running at %APP_URL%.
-    echo No new browser window was opened.
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath $env:APP_URL"
+    if errorlevel 1 (
+        echo [WARN] Browser did not open automatically. Open %APP_URL% manually.
+    ) else (
+        echo [OK] %APP_NAME% is already running and open at %APP_URL%.
+    )
     echo.
     rmdir "%LOCK_DIR%" >nul 2>&1
     exit /b 0
@@ -95,9 +99,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-start "" "%APP_URL%"
-
-echo [OK] %APP_NAME% is open at %APP_URL%
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath $env:APP_URL"
+if errorlevel 1 (
+    echo [WARN] Browser did not open automatically. Open %APP_URL% manually.
+) else (
+    echo [OK] %APP_NAME% is open at %APP_URL%
+)
 echo.
 echo Double-click stop.bat to close this app.
 echo.

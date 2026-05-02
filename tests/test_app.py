@@ -129,10 +129,17 @@ class LauncherGuardTests(unittest.TestCase):
 
         self.assertIn('set "LOCK_DIR=.start.lock"', start_script)
         self.assertIn("start is already in progress", start_script)
-        self.assertIn("is already running at %APP_URL%", start_script)
-        self.assertIn("No new browser window was opened.", start_script)
+        self.assertIn("is already running and open at %APP_URL%", start_script)
+        self.assertIn("Start-Process -FilePath $env:APP_URL", start_script)
+        self.assertNotIn("No new browser window was opened.", start_script)
         self.assertIn("call stop.bat /quiet", start_script)
         self.assertIn('del /f /q "%PID_FILE%"', start_script)
+
+    def test_stop_script_suppresses_stale_taskkill_races(self):
+        stop_script = Path("stop.bat").read_text(encoding="utf-8")
+
+        self.assertIn("*> $null", stop_script)
+        self.assertIn("No %APP_NAME% instance was running.", stop_script)
 
 
 if __name__ == "__main__":
