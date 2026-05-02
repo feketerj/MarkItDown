@@ -11,6 +11,7 @@
   const API_FORMATS = '/api/formats';
   const HISTORY_KEY = 'mdcreator_history';
   const MAX_HISTORY = 20;
+  const HISTORY_MARKDOWN_LIMIT = 1024 * 1024;
 
   // ── State ──
   let currentMarkdown = '';
@@ -19,7 +20,7 @@
 
   // ── markdown-it instance ──
   const mdit = window.markdownit({
-    html: true,
+    html: false,
     linkify: true,
     typographer: true,
     breaks: true,
@@ -289,18 +290,28 @@
   }
 
   function addToHistory(data) {
-    const history = getHistory();
-    history.unshift({
-      filename: data.filename,
-      extension: data.extension,
-      file_size: data.file_size,
-      markdown_length: data.markdown_length,
-      conversion_time: data.conversion_time,
-      markdown: data.markdown,
-      timestamp: new Date().toISOString(),
-    });
-    if (history.length > MAX_HISTORY) history.pop();
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+    try {
+      const history = getHistory();
+      const saveMarkdown = typeof data.markdown === 'string' && data.markdown.length <= HISTORY_MARKDOWN_LIMIT;
+      history.unshift({
+        filename: data.filename,
+        extension: data.extension,
+        file_size: data.file_size,
+        markdown_length: data.markdown_length,
+        conversion_time: data.conversion_time,
+        markdown: saveMarkdown ? data.markdown : null,
+        markdown_omitted: !saveMarkdown,
+        timestamp: new Date().toISOString(),
+      });
+      if (history.length > MAX_HISTORY) history.pop();
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+      if (!saveMarkdown) {
+        showToast('Large result shown, but full Markdown was not saved to history.', 'info');
+      }
+    } catch (err) {
+      console.warn('History save failed:', err);
+      showToast('Result shown, but history was not saved.', 'info');
+    }
   }
 
   function renderHistory() {
@@ -314,7 +325,7 @@
         (item, i) => `
       <div class="history-item" data-index="${i}">
         <div class="history-item-name">${escapeHtml(item.filename)}</div>
-        <div class="history-item-meta">${formatBytes(item.file_size)} · ${item.markdown_length.toLocaleString()} chars · ${timeAgo(item.timestamp)}</div>
+        <div class="history-item-meta">${formatBytes(item.file_size)} · ${item.markdown_length.toLocaleString()} chars · ${timeAgo(item.timestamp)}${item.markdown_omitted ? ' · full text not saved' : ''}</div>
       </div>`
       )
       .join('');
@@ -323,6 +334,10 @@
       el.addEventListener('click', () => {
         const idx = parseInt(el.dataset.index, 10);
         const item = history[idx];
+        if (item.markdown === null || item.markdown === undefined) {
+          showToast('Full Markdown was not saved for this large history item.', 'error');
+          return;
+        }
         currentMarkdown = item.markdown;
         currentFilename = item.filename.replace(/\.[^.]+$/, '') + '.md';
         showResults({
