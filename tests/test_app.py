@@ -93,5 +93,15 @@ class FrontendGuardTests(unittest.TestCase):
         self.assertIn("History save failed", app_js)
 
 
+class LauncherGuardTests(unittest.TestCase):
+    def test_start_script_is_locked_and_idempotent(self):
+        start_script = Path("start.bat").read_text(encoding="utf-8")
+
+        self.assertIn('set "LOCK_DIR=.start.lock"', start_script)
+        self.assertIn("start is already in progress", start_script)
+        self.assertIn("is already running at %APP_URL%", start_script)
+        self.assertIn("No new browser window was opened.", start_script)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,15 @@ echo.
 echo Starting %APP_NAME% at %APP_URL%...
 echo.
 
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$url=$env:APP_URL + '/api/health'; $name=$env:APP_NAME; try { $h=Invoke-RestMethod -Uri $url -TimeoutSec 2; if($h.status -eq 'ok' -and $h.app_name -eq $name){ exit 0 } } catch {}; exit 1"
+if not errorlevel 1 (
+    echo [OK] %APP_NAME% is already running at %APP_URL%.
+    echo No new browser window was opened.
+    echo.
+    rmdir "%LOCK_DIR%" >nul 2>&1
+    exit /b 0
+)
+
 if not exist "%VENV_PY%" (
     echo Creating virtual environment...
     python -m venv .venv
