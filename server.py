@@ -7,12 +7,28 @@ import os
 import time
 import tempfile
 import traceback
+import warnings
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+# Optional MarkItDown dependencies emit noisy import-time warnings in CI/local
+# environments even when the affected converters are not being used.
+warnings.filterwarnings(
+    "ignore",
+    message="Couldn't find ffmpeg or avconv.*",
+    category=RuntimeWarning,
+    module="pydub.utils",
+)
+warnings.filterwarnings(
+    "ignore",
+    message="Unsupported Windows version.*ONNX Runtime supports Windows 10 and above, only.",
+    category=UserWarning,
+    module="onnxruntime.capi.onnxruntime_validation",
+)
 
 from markitdown import MarkItDown
 

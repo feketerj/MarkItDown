@@ -23,6 +23,9 @@ jobs:
       APP_HOST: 127.0.0.1
       APP_PORT: 8765
       APP_RELOAD: "0"
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: init.defaultBranch
+      GIT_CONFIG_VALUE_0: master
 
     steps:
       - name: Check out repository
