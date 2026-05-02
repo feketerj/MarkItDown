@@ -9,6 +9,7 @@
   // ── Config ──
   const API_CONVERT = '/api/convert';
   const API_FORMATS = '/api/formats';
+  const API_TOKEN = document.querySelector('meta[name="mdcreator-token"]')?.content || '';
   const HISTORY_KEY = 'mdcreator_history';
   const MAX_HISTORY = 20;
   const HISTORY_MARKDOWN_LIMIT = 1024 * 1024;
@@ -127,7 +128,11 @@
     formData.append('engine', selectedEngine);
 
     try {
-      const res = await fetch(API_CONVERT, { method: 'POST', body: formData });
+      const res = await fetch(API_CONVERT, {
+        method: 'POST',
+        body: formData,
+        headers: { 'X-MD-Creator-Token': API_TOKEN },
+      });
       const data = await res.json();
 
       if (!res.ok) {

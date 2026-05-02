@@ -3,17 +3,21 @@ MD_CREATOR — Universal Markdown Converter
 FastAPI backend powered by Microsoft MarkItDown + MinerU
 """
 
+import asyncio
+import html
 import os
+import secrets
 import time
 import tempfile
 import traceback
 import warnings
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 
 # Optional MarkItDown dependencies emit noisy import-time warnings in CI/local
 # environments even when the affected converters are not being used.
@@ -45,6 +49,8 @@ APP_NAME = os.getenv("APP_NAME") or Path(__file__).resolve().parent.name
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "8000"))
 APP_RELOAD = os.getenv("APP_RELOAD", os.getenv("MD_CREATOR_RELOAD", "0")) == "1"
+APP_TOKEN = os.getenv("APP_TOKEN") or secrets.token_urlsafe(32)
+CONVERSION_CONCURRENCY = max(1, int(os.getenv("CONVERSION_CONCURRENCY", "1")))
 
 app = FastAPI(
     title=APP_NAME,
@@ -98,6 +104,7 @@ ENGINES = [
 MAX_FILE_SIZE = 50 * 1024 * 1024
 MAX_REQUEST_SIZE = MAX_FILE_SIZE + (1024 * 1024)
 UPLOAD_CHUNK_SIZE = 1024 * 1024
+conversion_semaphore = asyncio.Semaphore(CONVERSION_CONCURRENCY)
 
 # Supported formats metadata
 SUPPORTED_FORMATS = [
@@ -127,6 +134,12 @@ SUPPORTED_FORMATS = [
     {"ext": ".md", "label": "Markdown", "icon": "✏️", "category": "Text"},
     {"ext": ".rst", "label": "reStructuredText", "icon": "📃", "category": "Text"},
 ]
+
+
+async def run_converter(func, *args):
+    """Run blocking converter SDK calls without blocking the event loop."""
+    async with conversion_semaphore:
+        return await run_in_threadpool(func, *args)
 
 
 # ── API Routes ─────────────────────────────────────────────────────────────────
@@ -166,6 +179,7 @@ async def convert_file(
     request: Request,
     file: UploadFile = File(...),
     engine: str = Form("standard"),
+    x_mdcreator_token: str = Header(default="", alias="X-MD-Creator-Token"),
 ):
     """
     Convert an uploaded file to Markdown.
@@ -173,6 +187,9 @@ async def convert_file(
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
+
+    if not secrets.compare_digest(x_mdcreator_token, APP_TOKEN):
+        raise HTTPException(status_code=403, detail="Invalid local session token")
 
     content_length = request.headers.get("content-length")
     if content_length:
@@ -214,12 +231,12 @@ async def convert_file(
         # ── Academic engine (MinerU) ──
         if engine_used == "academic" and MINERU_AVAILABLE and ext == ".pdf":
             try:
-                mineru_result = mineru_client.flash_extract(tmp_path)
+                mineru_result = await run_converter(mineru_client.flash_extract, tmp_path)
                 markdown_text = mineru_result.markdown or ""
             except Exception as mineru_err:
                 # Fallback to MarkItDown
                 traceback.print_exc()
-                result = md_engine.convert(tmp_path)
+                result = await run_converter(md_engine.convert, tmp_path)
                 markdown_text = result.text_content or ""
                 engine_used = "standard"
                 fallback_warning = f"MinerU failed ({str(mineru_err)[:80]}), fell back to Standard."
@@ -230,13 +247,13 @@ async def convert_file(
                 fallback_warning = "MinerU not available, using Standard engine."
             elif ext != ".pdf":
                 fallback_warning = "Academic engine only supports PDF. Using Standard."
-            result = md_engine.convert(tmp_path)
+            result = await run_converter(md_engine.convert, tmp_path)
             markdown_text = result.text_content or ""
             engine_used = "standard"
 
         # ── Standard engine (MarkItDown) ──
         else:
-            result = md_engine.convert(tmp_path)
+            result = await run_converter(md_engine.convert, tmp_path)
             markdown_text = result.text_content or ""
 
         elapsed = round(time.time() - start_time, 2)
@@ -290,7 +307,11 @@ async def serve_frontend():
     index_path = static_dir / "index.html"
     if not index_path.exists():
         return HTMLResponse("<h1>MD_CREATOR — Frontend not found</h1>", status_code=404)
-    return HTMLResponse(index_path.read_text(encoding="utf-8"))
+    index_html = index_path.read_text(encoding="utf-8").replace(
+        "__MD_CREATOR_TOKEN__",
+        html.escape(APP_TOKEN, quote=True),
+    )
+    return HTMLResponse(index_html)
 
 
 # ── Entry Point ────────────────────────────────────────────────────────────────

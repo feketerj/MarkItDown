@@ -88,6 +88,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$url=$env:APP_URL + '/ap
 if errorlevel 1 (
     echo [ERROR] Server did not become healthy in time.
     echo Check .server.log and .server.err.log in this folder.
+    call stop.bat /quiet >nul 2>&1
+    del /f /q "%PID_FILE%" >nul 2>&1
     rmdir "%LOCK_DIR%" >nul 2>&1
     pause
     exit /b 1
