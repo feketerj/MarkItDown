@@ -424,11 +424,16 @@ class FrontendGuardTests(unittest.TestCase):
 class LauncherGuardTests(unittest.TestCase):
     def test_start_script_is_locked_and_idempotent(self):
         start_script = Path("start.bat").read_text(encoding="utf-8")
+        browser_launch_command = (
+            'powershell -NoProfile -ExecutionPolicy Bypass -Command "try { '
+            "Start-Process -FilePath $env:APP_URL -ErrorAction Stop; "
+            'exit 0 } catch { exit 1 }"'
+        )
 
         self.assertIn('set "LOCK_DIR=.start.lock"', start_script)
         self.assertIn("start is already in progress", start_script)
         self.assertIn("is already running and open at %APP_URL%", start_script)
-        self.assertIn("Start-Process -FilePath $env:APP_URL", start_script)
+        self.assertEqual(start_script.count(browser_launch_command), 2)
         self.assertNotIn("No new browser window was opened.", start_script)
         self.assertIn("call stop.bat /quiet", start_script)
         self.assertIn('del /f /q "%PID_FILE%"', start_script)

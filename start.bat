@@ -32,7 +32,7 @@ echo.
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$url=$env:APP_URL + '/api/health'; $name=$env:APP_NAME; try { $h=Invoke-RestMethod -Uri $url -TimeoutSec 2; if($h.status -eq 'ok' -and $h.app_name -eq $name){ exit 0 } } catch {}; exit 1"
 if not errorlevel 1 (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath $env:APP_URL"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath $env:APP_URL -ErrorAction Stop; exit 0 } catch { exit 1 }"
     if errorlevel 1 (
         echo [WARN] Browser did not open automatically. Open %APP_URL% manually.
     ) else (
@@ -118,7 +118,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath $env:APP_URL"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath $env:APP_URL -ErrorAction Stop; exit 0 } catch { exit 1 }"
 if errorlevel 1 (
     echo [WARN] Browser did not open automatically. Open %APP_URL% manually.
 ) else (
