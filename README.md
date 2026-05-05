@@ -12,6 +12,8 @@ A premium web application that converts **any file** to clean Markdown. Powered 
 
 Drop any file into the web UI and get clean, structured Markdown back in seconds. The conversion engine is Microsoft's MarkItDown library — the most popular file-to-Markdown converter on GitHub (119k+ stars).
 
+For folders of files, use `batch.bat` or `batch_convert.py`. Batch mode writes one `.md` file per input file, preserves subfolders, records results in `batch-results.json`, and leaves the single-file web app unchanged.
+
 ### Supported Formats
 
 | Category | Formats |
@@ -122,11 +124,42 @@ Open **http://127.0.0.1:8000** in your browser. Use `stop.bat` to close the back
 
 ---
 
+## Batch Conversion
+
+Double-click `batch.bat` for the folder workflow:
+
+1. The first run creates an `input` folder if it does not exist.
+2. Drop files into `input`.
+3. Run `batch.bat` again.
+4. Markdown files are written to `output`, with subfolders preserved.
+5. A machine-readable report is written to `output/batch-results.json`.
+
+`batch.bat` uses academic mode by default. PDF files use MinerU when available and fall back to Standard if MinerU is unavailable or fails. Non-PDF files always use Standard in academic mode.
+
+CLI usage:
+
+```powershell
+python batch_convert.py input output --engine academic
+python batch_convert.py input output --engine standard --overwrite
+python batch_convert.py input output --engine auto --json
+```
+
+Safety behavior:
+
+- Existing `.md` outputs are skipped unless `--overwrite` is provided.
+- The output folder cannot be inside the input folder, which prevents recursive output loops.
+- Each source file keeps an independent success, skipped, or error record.
+- Files over the configured size limit are reported as errors and are not converted.
+
+---
+
 ## Project Structure
 
 ```
 MarkItDown/
 ├── server.py              # FastAPI backend — file upload, MarkItDown conversion, static serving
+├── batch.bat              # Double-click folder batch converter
+├── batch_convert.py       # Testable batch conversion CLI/API
 ├── requirements.txt       # Python dependencies
 └── static/
     ├── index.html         # Single-page application — drag/drop, results, history sidebar
