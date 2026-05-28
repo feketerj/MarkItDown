@@ -17,6 +17,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
+from spreadsheet_convert import (
+    SpreadsheetConversionOptions,
+    convert_spreadsheet_to_path,
+    is_spreadsheet_path,
+)
+
 
 MAX_FILE_SIZE = 50 * 1024 * 1024
 VALID_ENGINES = {"standard", "academic", "auto"}
@@ -98,6 +104,7 @@ def run_batch(
     max_file_size: int = MAX_FILE_SIZE,
     md_engine=None,
     mineru_client=None,
+    spreadsheet_options: SpreadsheetConversionOptions | None = None,
     report_name: str = "batch-results.json",
 ) -> BatchSummary:
     engine = engine.lower()
@@ -142,6 +149,7 @@ def run_batch(
                 max_file_size,
                 get_markitdown,
                 get_mineru,
+                spreadsheet_options,
             )
         )
 
@@ -204,6 +212,7 @@ def _convert_one(
     max_file_size: int,
     get_markitdown: Callable,
     get_mineru: Callable,
+    spreadsheet_options: SpreadsheetConversionOptions | None,
 ) -> BatchFileResult:
     source_label = _relative_posix(source, input_path)
     output_label = _relative_posix(target, output_path)
@@ -230,6 +239,23 @@ def _convert_one(
         )
 
     try:
+        if is_spreadsheet_path(source):
+            result = convert_spreadsheet_to_path(source, target, spreadsheet_options)
+            warnings = []
+            if engine == "academic":
+                warnings.append("Academic engine only supports PDF. Using spreadsheet converter.")
+            warnings.extend(result.warnings)
+            return BatchFileResult(
+                source=source_label,
+                output=output_label,
+                status="converted",
+                engine_requested=engine,
+                engine_used="standard",
+                file_size=file_size,
+                markdown_length=result.markdown_length,
+                warning=" ".join(warnings) if warnings else None,
+            )
+
         markdown_text, engine_used, warning = _convert_source(source, engine, get_markitdown, get_mineru)
         _write_text_atomic(target, markdown_text)
         return BatchFileResult(

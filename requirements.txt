@@ -3,3 +3,6 @@ uvicorn[standard]>=0.32.0
 markitdown[all]>=0.1.0
 python-multipart>=0.0.12
 mineru-open-sdk>=0.2.0
+charset-normalizer>=3.4.0
+openpyxl>=3.1.0
+xlrd>=2.0.1

@@ -137,6 +137,28 @@ class BatchConvertTests(unittest.TestCase):
             self.assertEqual(md_engine.converted, [])
             self.assertEqual((output_dir / "notes.md").read_text(encoding="utf-8"), "old")
 
+    def test_batch_uses_streaming_converter_for_spreadsheets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            (input_dir / "data.csv").write_text("Name,Value\nAlice,1\nBob,2\n", encoding="utf-8")
+            md_engine = StubMarkItDown()
+
+            summary = batch_convert.run_batch(
+                input_dir,
+                output_dir,
+                engine="standard",
+                md_engine=md_engine,
+            )
+
+            self.assertEqual(summary.converted, 1)
+            self.assertEqual(md_engine.converted, [])
+            markdown = (output_dir / "data.md").read_text(encoding="utf-8")
+            self.assertIn("| Name | Value |", markdown)
+            self.assertIn("| Bob | 2 |", markdown)
+
     def test_reports_output_name_collisions(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

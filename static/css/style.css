@@ -143,8 +143,16 @@ body::before {
 .drop-zone-icon { font-size: 3rem; margin-bottom: 16px; display: block; }
 .drop-zone-text { font-size: 1.1rem; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
 .drop-zone-hint { font-size: 0.85rem; color: var(--text-muted); }
-.drop-zone-hint span { color: var(--accent); font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
-#file-input { display: none; }
+.browse-trigger {
+  color: var(--accent); font-weight: 600; cursor: pointer;
+  text-decoration: underline; text-underline-offset: 2px;
+  font-size: inherit; line-height: inherit; padding: 0;
+}
+.browse-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+#file-input {
+  position: absolute; width: 1px; height: 1px;
+  opacity: 0; pointer-events: none; overflow: hidden;
+}
 
 /* ── Engine Selector ── */
 .engine-selector {

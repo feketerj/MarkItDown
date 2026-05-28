@@ -13,10 +13,13 @@
   const HISTORY_KEY = 'mdcreator_history';
   const MAX_HISTORY = 20;
   const HISTORY_MARKDOWN_LIMIT = 1024 * 1024;
+  const PREVIEW_RENDER_LIMIT = 500 * 1024;
 
   // ── State ──
   let currentMarkdown = '';
   let currentFilename = '';
+  let currentDownloadId = '';
+  let currentMarkdownIsPreview = false;
   let selectedEngine = 'standard';
 
   // ── markdown-it instance ──
@@ -103,15 +106,27 @@
       const file = e.dataTransfer.files[0];
       if (file) convertFile(file);
     });
-    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('click', openFilePicker);
     browseTrigger.addEventListener('click', (e) => {
       e.stopPropagation();
-      fileInput.click();
+      openFilePicker();
     });
     fileInput.addEventListener('change', () => {
       if (fileInput.files[0]) convertFile(fileInput.files[0]);
       fileInput.value = '';
     });
+  }
+
+  function openFilePicker() {
+    if (typeof fileInput.showPicker === 'function') {
+      try {
+        fileInput.showPicker();
+        return;
+      } catch {
+        // Fall back for browsers that expose showPicker but reject it here.
+      }
+    }
+    fileInput.click();
   }
 
   // ── Convert File ──
@@ -128,7 +143,7 @@
     formData.append('engine', selectedEngine);
 
     try {
-      const res = await fetch(API_CONVERT, {
+      const res = await fetchWithServerHint(API_CONVERT, {
         method: 'POST',
         body: formData,
         headers: { 'X-MD-Creator-Token': API_TOKEN },
@@ -139,12 +154,14 @@
         throw new Error(data.detail || 'Conversion failed');
       }
 
-      currentMarkdown = data.markdown;
-      currentFilename = data.filename.replace(/\.[^.]+$/, '') + '.md';
+      currentMarkdown = data.markdown || '';
+      currentFilename = data.download_filename || data.filename.replace(/\.[^.]+$/, '') + '.md';
+      currentDownloadId = data.download_id || '';
+      currentMarkdownIsPreview = Boolean(data.markdown_is_preview || data.preview_truncated);
 
       showResults(data);
       addToHistory(data);
-      showToast('Conversion complete! ✨', 'success');
+      showToast(data.preview_truncated ? 'Preview ready. Full Markdown is available for download.' : 'Conversion complete! ✨', 'success');
     } catch (err) {
       showUpload();
       showToast(err.message || 'Conversion failed', 'error');
@@ -168,7 +185,7 @@
     resultsFilename.textContent = data.filename;
     resultsSize.textContent = formatBytes(data.file_size);
     resultsTime.textContent = `\u26A1 ${data.conversion_time}s`;
-    resultsChars.textContent = `${data.markdown_length.toLocaleString()} chars`;
+    resultsChars.textContent = `${data.markdown_length.toLocaleString()} chars${data.preview_truncated ? ' full' : ''}`;
 
     // Engine badge
     const eng = data.engine || 'standard';
@@ -181,14 +198,18 @@
     resultsFilename.parentNode.insertBefore(badge, resultsSize);
 
     // Fallback warning
-    if (data.warning) {
-      showToast(data.warning, 'error');
+    const warnings = Array.isArray(data.warnings) ? data.warnings : (data.warning ? [data.warning] : []);
+    warnings.forEach((warning) => showToast(warning, 'error'));
+
+    const markdown = data.markdown || '';
+    rawPane.textContent = markdown;
+    if (markdown.length <= PREVIEW_RENDER_LIMIT) {
+      previewPane.innerHTML = mdit.render(markdown);
+    } else {
+      previewPane.textContent = 'Preview omitted for large Markdown output. Download the full file or use the raw pane.';
     }
 
-    rawPane.textContent = data.markdown;
-    previewPane.innerHTML = mdit.render(data.markdown);
-
-    const lines = (data.markdown.match(/\n/g) || []).length + 1;
+    const lines = (markdown.match(/\n/g) || []).length + 1;
     lineCount.textContent = `${lines} lines`;
   }
 
@@ -205,23 +226,32 @@
     $('#btn-copy').addEventListener('click', async () => {
       try {
         await navigator.clipboard.writeText(currentMarkdown);
-        showToast('Copied to clipboard! 📋', 'success');
+        showToast(currentMarkdownIsPreview ? 'Copied preview to clipboard.' : 'Copied to clipboard! 📋', 'success');
       } catch {
         fallbackCopy(currentMarkdown);
       }
     });
 
-    $('#btn-download').addEventListener('click', () => {
-      const blob = new Blob([currentMarkdown], { type: 'text/markdown;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = currentFilename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      showToast('Downloaded! 💾', 'success');
+    $('#btn-download').addEventListener('click', async () => {
+      try {
+        let blob;
+        if (currentDownloadId) {
+          const res = await fetchWithServerHint(`/api/download/${encodeURIComponent(currentDownloadId)}`, {
+            headers: { 'X-MD-Creator-Token': API_TOKEN },
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.detail || 'Download failed');
+          }
+          blob = await res.blob();
+        } else {
+          blob = new Blob([currentMarkdown], { type: 'text/markdown;charset=utf-8' });
+        }
+        triggerDownload(blob, currentFilename);
+        showToast('Downloaded! 💾', 'success');
+      } catch (err) {
+        showToast(err.message || 'Download failed', 'error');
+      }
     });
 
     $('#btn-new').addEventListener('click', showUpload);
@@ -237,6 +267,28 @@
     document.execCommand('copy');
     document.body.removeChild(ta);
     showToast('Copied to clipboard! 📋', 'success');
+  }
+
+  function triggerDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  async function fetchWithServerHint(url, options) {
+    try {
+      return await fetch(url, options);
+    } catch (err) {
+      if (err instanceof TypeError) {
+        throw new Error('Cannot reach the local converter server. Restart with start.bat, then refresh this page.');
+      }
+      throw err;
+    }
   }
 
   // ── Tabs ──
@@ -297,7 +349,10 @@
   function addToHistory(data) {
     try {
       const history = getHistory();
-      const saveMarkdown = typeof data.markdown === 'string' && data.markdown.length <= HISTORY_MARKDOWN_LIMIT;
+      const saveMarkdown = typeof data.markdown === 'string' &&
+        data.markdown.length <= HISTORY_MARKDOWN_LIMIT &&
+        !data.markdown_is_preview &&
+        !data.preview_truncated;
       history.unshift({
         filename: data.filename,
         extension: data.extension,
@@ -306,12 +361,13 @@
         conversion_time: data.conversion_time,
         markdown: saveMarkdown ? data.markdown : null,
         markdown_omitted: !saveMarkdown,
+        preview_truncated: Boolean(data.preview_truncated),
         timestamp: new Date().toISOString(),
       });
       if (history.length > MAX_HISTORY) history.pop();
       localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
       if (!saveMarkdown) {
-        showToast('Large result shown, but full Markdown was not saved to history.', 'info');
+        showToast(data.preview_truncated ? 'Preview shown, but full Markdown was not saved to history.' : 'Large result shown, but full Markdown was not saved to history.', 'info');
       }
     } catch (err) {
       console.warn('History save failed:', err);
@@ -345,6 +401,8 @@
         }
         currentMarkdown = item.markdown;
         currentFilename = item.filename.replace(/\.[^.]+$/, '') + '.md';
+        currentDownloadId = '';
+        currentMarkdownIsPreview = false;
         showResults({
           filename: item.filename,
           file_size: item.file_size,

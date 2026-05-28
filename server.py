@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
@@ -35,6 +35,13 @@ warnings.filterwarnings(
 )
 
 from markitdown import MarkItDown
+from spreadsheet_convert import (
+    SpreadsheetConversionError,
+    SpreadsheetConversionOptions,
+    SpreadsheetLimitError,
+    convert_spreadsheet_to_path,
+    is_spreadsheet_path,
+)
 
 # MinerU cloud SDK (optional — graceful if unavailable)
 try:
@@ -51,6 +58,28 @@ APP_PORT = int(os.getenv("APP_PORT", "8000"))
 APP_RELOAD = os.getenv("APP_RELOAD", os.getenv("MD_CREATOR_RELOAD", "0")) == "1"
 APP_TOKEN = os.getenv("APP_TOKEN") or secrets.token_urlsafe(32)
 CONVERSION_CONCURRENCY = max(1, int(os.getenv("CONVERSION_CONCURRENCY", "1")))
+CONVERSION_ARTIFACT_DIR = Path(
+    os.getenv(
+        "CONVERSION_ARTIFACT_DIR",
+        str(Path(tempfile.gettempdir()) / "mdcreator_artifacts"),
+    )
+)
+CONVERSION_ARTIFACT_TTL_SECONDS = max(60, int(os.getenv("CONVERSION_ARTIFACT_TTL_SECONDS", "3600")))
+SPREADSHEET_OPTIONS = SpreadsheetConversionOptions(
+    preview_rows_per_sheet=max(1, int(os.getenv("SPREADSHEET_PREVIEW_ROWS_PER_SHEET", "100"))),
+    preview_max_chars=max(1, int(os.getenv("SPREADSHEET_PREVIEW_MAX_CHARS", "500000"))),
+    max_sheets=max(1, int(os.getenv("SPREADSHEET_MAX_SHEETS", "100"))),
+    max_columns=max(1, int(os.getenv("SPREADSHEET_MAX_COLUMNS", "256"))),
+    max_cell_chars=max(1, int(os.getenv("SPREADSHEET_MAX_CELL_CHARS", "2000"))),
+    max_output_chars=max(1, int(os.getenv("SPREADSHEET_MAX_OUTPUT_CHARS", str(25 * 1024 * 1024)))),
+    timeout_seconds=max(1, int(os.getenv("SPREADSHEET_TIMEOUT_SECONDS", "120"))),
+    max_xlsx_uncompressed_bytes=max(
+        1,
+        int(os.getenv("SPREADSHEET_MAX_XLSX_UNCOMPRESSED_BYTES", str(512 * 1024 * 1024))),
+    ),
+    max_xlsx_compression_ratio=max(1, int(os.getenv("SPREADSHEET_MAX_XLSX_COMPRESSION_RATIO", "200"))),
+    header_scan_rows=max(1, int(os.getenv("SPREADSHEET_HEADER_SCAN_ROWS", "25"))),
+)
 
 app = FastAPI(
     title=APP_NAME,
@@ -142,6 +171,37 @@ async def run_converter(func, *args):
         return await run_in_threadpool(func, *args)
 
 
+def cleanup_conversion_artifacts() -> None:
+    """Remove expired conversion artifacts opportunistically."""
+    CONVERSION_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - CONVERSION_ARTIFACT_TTL_SECONDS
+    for path in CONVERSION_ARTIFACT_DIR.glob("*.md"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def create_conversion_artifact_path() -> tuple[str, Path]:
+    cleanup_conversion_artifacts()
+    CONVERSION_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    artifact_id = secrets.token_urlsafe(24)
+    return artifact_id, CONVERSION_ARTIFACT_DIR / f"{artifact_id}.md"
+
+
+def resolve_conversion_artifact_path(artifact_id: str) -> Path | None:
+    if not artifact_id or not all(ch.isalnum() or ch in {"-", "_"} for ch in artifact_id):
+        return None
+    root = CONVERSION_ARTIFACT_DIR.resolve()
+    path = (root / f"{artifact_id}.md").resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None
+    return path
+
+
 # ── API Routes ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/formats")
@@ -164,6 +224,7 @@ async def get_health():
                 "academic": MINERU_AVAILABLE,
             },
             "mineru_available": MINERU_AVAILABLE,
+            "spreadsheet_converter": True,
         }
     )
 
@@ -172,6 +233,27 @@ async def get_health():
 async def get_engines():
     """Return list of available conversion engines."""
     return JSONResponse(content={"engines": ENGINES})
+
+
+@app.get("/api/download/{artifact_id}")
+async def download_conversion_artifact(
+    artifact_id: str,
+    x_mdcreator_token: str = Header(default="", alias="X-MD-Creator-Token"),
+):
+    """Download a generated conversion artifact."""
+    if not secrets.compare_digest(x_mdcreator_token, APP_TOKEN):
+        raise HTTPException(status_code=403, detail="Invalid local session token")
+
+    cleanup_conversion_artifacts()
+    artifact_path = resolve_conversion_artifact_path(artifact_id)
+    if artifact_path is None or not artifact_path.exists():
+        raise HTTPException(status_code=404, detail="Converted file is no longer available")
+
+    return FileResponse(
+        artifact_path,
+        media_type="text/markdown; charset=utf-8",
+        filename="converted.md",
+    )
 
 
 @app.post("/api/convert")
@@ -227,9 +309,39 @@ async def convert_file(
 
         engine_used = engine if engine in {"standard", "academic"} else "standard"
         fallback_warning = None
+        response_warnings = []
+        spreadsheet_result = None
+        download_id = None
+        download_filename = Path(file.filename).with_suffix(".md").name
+
+        # ── Local streaming spreadsheet converter ──
+        if is_spreadsheet_path(file.filename):
+            if engine_used == "academic":
+                fallback_warning = "Academic engine only supports PDF. Using spreadsheet converter."
+            engine_used = "standard"
+            download_id, artifact_path = create_conversion_artifact_path()
+            try:
+                spreadsheet_result = await run_converter(
+                    convert_spreadsheet_to_path,
+                    tmp_path,
+                    artifact_path,
+                    SPREADSHEET_OPTIONS,
+                    file.filename,
+                )
+            except SpreadsheetLimitError as spreadsheet_limit:
+                artifact_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail=str(spreadsheet_limit))
+            except SpreadsheetConversionError as spreadsheet_error:
+                artifact_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Spreadsheet conversion failed: {spreadsheet_error}",
+                )
+            markdown_text = spreadsheet_result.preview
+            response_warnings.extend(spreadsheet_result.warnings)
 
         # ── Academic engine (MinerU) ──
-        if engine_used == "academic" and MINERU_AVAILABLE and ext == ".pdf":
+        elif engine_used == "academic" and MINERU_AVAILABLE and ext == ".pdf":
             try:
                 mineru_result = await run_converter(mineru_client.flash_extract, tmp_path)
                 markdown_text = mineru_result.markdown or ""
@@ -265,12 +377,29 @@ async def convert_file(
             "extension": ext,
             "file_size": total_size,
             "markdown": markdown_text,
-            "markdown_length": len(markdown_text),
+            "markdown_length": spreadsheet_result.markdown_length if spreadsheet_result else len(markdown_text),
             "conversion_time": elapsed,
             "engine": engine_used,
         }
         if fallback_warning:
-            response_data["warning"] = fallback_warning
+            response_warnings.insert(0, fallback_warning)
+        if response_warnings:
+            response_data["warning"] = response_warnings[0]
+            response_data["warnings"] = response_warnings
+        if spreadsheet_result:
+            response_data.update(
+                {
+                    "converter": "spreadsheet",
+                    "markdown_is_preview": spreadsheet_result.preview_truncated,
+                    "preview_truncated": spreadsheet_result.preview_truncated,
+                    "download_id": download_id,
+                    "download_filename": download_filename,
+                    "spreadsheet": {
+                        "sheets": spreadsheet_result.sheets,
+                        "rows": spreadsheet_result.rows,
+                    },
+                }
+            )
 
         return JSONResponse(content=response_data)
 
