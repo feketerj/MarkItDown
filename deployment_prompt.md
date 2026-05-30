@@ -23,6 +23,7 @@ It supports:
 - PPTX cleanup that rewrites MarkItDown slide comments into NotebookLM-safe headings:
   ### Slide Number: N
 - Authenticated temporary download artifacts for large spreadsheet and bulk outputs.
+- A redacted diagnostics packet via tools/doctor.py and GET /api/diagnostics for fast failure classification during demos.
 
 ## Stack
 
@@ -91,6 +92,7 @@ Run:
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -q
 .\.venv\Scripts\python.exe -m py_compile server.py batch_convert.py markdown_cleanup.py
+.\.venv\Scripts\python.exe tools\doctor.py
 node --check static\js\app.js
 ```
 
@@ -108,6 +110,8 @@ Then smoke-test in the browser:
 - batch_convert.py: reusable folder conversion engine.
 - spreadsheet_convert.py: streaming spreadsheet converter.
 - markdown_cleanup.py: PPTX slide marker cleanup.
+- diagnostics.py: redacted diagnostics packet builder.
+- tools/doctor.py: local diagnostics CLI.
 - static/index.html: single-file and bulk UI.
 - static/js/app.js: frontend upload, polling, preview, history, and download behavior.
 - tests/: regression coverage for API, batch conversion, spreadsheet guardrails, and PPTX cleanup.

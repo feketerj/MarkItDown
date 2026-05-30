@@ -13,6 +13,7 @@ import tempfile
 import traceback
 import warnings
 import zipfile
+from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, UploadFile, File, Form, Header, HTTPException, Request
@@ -37,6 +38,7 @@ warnings.filterwarnings(
 )
 
 from batch_convert import BatchConfigurationError, run_batch
+from diagnostics import build_diagnostics_report, record_recent_failure
 from markitdown import MarkItDown
 from markdown_cleanup import normalize_markdown_for_source
 from spreadsheet_convert import (
@@ -148,6 +150,7 @@ MAX_REQUEST_SIZE = MAX_FILE_SIZE + (1024 * 1024)
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 conversion_semaphore = asyncio.Semaphore(CONVERSION_CONCURRENCY)
 bulk_jobs: dict[str, dict] = {}
+RECENT_FAILURES: list[dict] = []
 
 # Supported formats metadata
 SUPPORTED_FORMATS = [
@@ -183,6 +186,53 @@ async def run_converter(func, *args, **kwargs):
     """Run blocking converter SDK calls without blocking the event loop."""
     async with conversion_semaphore:
         return await run_in_threadpool(func, *args, **kwargs)
+
+
+def remember_failure(category: str, message: object, filename: str | None = None) -> None:
+    """Record a small redacted failure hint for diagnostics."""
+    extension = Path(filename).suffix.lower() if filename else None
+    record_recent_failure(RECENT_FAILURES, category, message, source_extension=extension)
+
+
+def build_diagnostics_payload() -> dict:
+    static_root = Path(__file__).parent / "static"
+    return build_diagnostics_report(
+        app={
+            "name": APP_NAME,
+            "host": APP_HOST,
+            "port": APP_PORT,
+            "reload": APP_RELOAD,
+            "token_configured": bool(APP_TOKEN),
+            "conversion_concurrency": CONVERSION_CONCURRENCY,
+        },
+        engines={
+            "standard": {"available": True, "provider": "Microsoft MarkItDown"},
+            "academic": {"available": MINERU_AVAILABLE, "provider": "MinerU"},
+            "spreadsheet": {"available": True, "provider": "local streaming converter"},
+            "bulk": {"available": True, "provider": "local batch converter"},
+        },
+        limits={
+            "max_file_size": MAX_FILE_SIZE,
+            "max_request_size": MAX_REQUEST_SIZE,
+            "bulk_max_files": BULK_MAX_FILES,
+            "bulk_max_total_size": BULK_MAX_TOTAL_SIZE,
+            "upload_chunk_size": UPLOAD_CHUNK_SIZE,
+            "conversion_artifact_ttl_seconds": CONVERSION_ARTIFACT_TTL_SECONDS,
+            "bulk_artifact_ttl_seconds": BULK_ARTIFACT_TTL_SECONDS,
+        },
+        artifact_dirs={
+            "conversion": CONVERSION_ARTIFACT_DIR,
+            "bulk": BULK_ARTIFACT_DIR,
+        },
+        static_files={
+            "index": static_root / "index.html",
+            "markdown_it": static_root / "js" / "markdown-it.min.js",
+        },
+        bulk_jobs=bulk_jobs,
+        recent_failures=RECENT_FAILURES,
+        supported_formats_count=len(SUPPORTED_FORMATS),
+        spreadsheet_options=asdict(SPREADSHEET_OPTIONS),
+    )
 
 
 def cleanup_conversion_artifacts() -> None:
@@ -403,10 +453,11 @@ async def run_bulk_conversion_job(job_id: str) -> None:
     except BatchConfigurationError as exc:
         job["status"] = "failed"
         job["error"] = str(exc)
+        remember_failure("api_failed", exc)
     except Exception as exc:
-        traceback.print_exc()
         job["status"] = "failed"
         job["error"] = f"Bulk conversion failed: {exc}"
+        remember_failure("conversion_failed", exc)
     finally:
         job["updated_at"] = time.time()
 
@@ -435,6 +486,7 @@ async def get_health():
             "mineru_available": MINERU_AVAILABLE,
             "spreadsheet_converter": True,
             "bulk_converter": True,
+            "diagnostics": True,
         }
     )
 
@@ -443,6 +495,19 @@ async def get_health():
 async def get_engines():
     """Return list of available conversion engines."""
     return JSONResponse(content={"engines": ENGINES})
+
+
+@app.get("/api/diagnostics")
+async def get_diagnostics(
+    x_mdcreator_token: str = Header(default="", alias="X-MD-Creator-Token"),
+):
+    """Return a small redacted diagnostics packet for local troubleshooting."""
+    if not secrets.compare_digest(x_mdcreator_token, APP_TOKEN):
+        raise HTTPException(status_code=403, detail="Invalid local session token")
+
+    cleanup_conversion_artifacts()
+    cleanup_bulk_artifacts()
+    return JSONResponse(content=build_diagnostics_payload())
 
 
 @app.get("/api/download/{artifact_id}")
@@ -517,7 +582,9 @@ async def create_bulk_conversion(
         bulk_jobs[job_id]["file_count"] = file_count
         bulk_jobs[job_id]["total_size"] = total_size
         bulk_jobs[job_id]["updated_at"] = time.time()
-    except HTTPException:
+    except HTTPException as exc:
+        category = "cap_tripped" if exc.status_code == 413 else "api_failed"
+        remember_failure(category, exc.detail)
         bulk_jobs.pop(job_id, None)
         shutil.rmtree(job_dir, ignore_errors=True)
         raise
@@ -598,6 +665,7 @@ async def convert_file(
     if content_length:
         try:
             if int(content_length) > MAX_REQUEST_SIZE:
+                remember_failure("cap_tripped", "request exceeded maximum file size", file.filename)
                 raise HTTPException(
                     status_code=413,
                     detail=f"Request too large. Maximum file size is {MAX_FILE_SIZE // (1024*1024)}MB",
@@ -622,6 +690,7 @@ async def convert_file(
                     break
                 total_size += len(chunk)
                 if total_size > MAX_FILE_SIZE:
+                    remember_failure("cap_tripped", "upload exceeded maximum file size", file.filename)
                     raise HTTPException(
                         status_code=413,
                         detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB",
@@ -651,9 +720,11 @@ async def convert_file(
                 )
             except SpreadsheetLimitError as spreadsheet_limit:
                 artifact_path.unlink(missing_ok=True)
+                remember_failure("cap_tripped", spreadsheet_limit, file.filename)
                 raise HTTPException(status_code=413, detail=str(spreadsheet_limit))
             except SpreadsheetConversionError as spreadsheet_error:
                 artifact_path.unlink(missing_ok=True)
+                remember_failure("conversion_failed", spreadsheet_error, file.filename)
                 raise HTTPException(
                     status_code=500,
                     detail=f"Spreadsheet conversion failed: {spreadsheet_error}",
@@ -668,7 +739,7 @@ async def convert_file(
                 markdown_text = mineru_result.markdown or ""
             except Exception as mineru_err:
                 # Fallback to MarkItDown
-                traceback.print_exc()
+                remember_failure("provider_failed", mineru_err, file.filename)
                 result = await run_converter(md_engine.convert, tmp_path)
                 markdown_text = normalize_markdown_for_source(result.text_content or "", file.filename)
                 engine_used = "standard"
@@ -728,7 +799,7 @@ async def convert_file(
         raise
 
     except Exception as e:
-        traceback.print_exc()
+        remember_failure("conversion_failed", e, file.filename)
         raise HTTPException(
             status_code=500,
             detail=f"Conversion failed: {str(e)}",

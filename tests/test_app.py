@@ -23,6 +23,7 @@ class ServerBehaviorTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(server.app)
         self.auth_headers = {"X-MD-Creator-Token": server.APP_TOKEN}
+        server.RECENT_FAILURES.clear()
 
     def wait_for_bulk_job(self, job_id):
         for _ in range(20):
@@ -177,6 +178,72 @@ class ServerBehaviorTests(unittest.TestCase):
             finally:
                 server.SPREADSHEET_OPTIONS = original_options
                 server.CONVERSION_ARTIFACT_DIR = original_artifact_dir
+
+    def test_diagnostics_requires_local_session_token(self):
+        response = self.client.get("/api/diagnostics")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_diagnostics_returns_redacted_failure_packet(self):
+        original_conversion_dir = server.CONVERSION_ARTIFACT_DIR
+        original_bulk_dir = server.BULK_ARTIFACT_DIR
+        original_jobs = server.bulk_jobs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            server.CONVERSION_ARTIFACT_DIR = root / "artifacts"
+            server.BULK_ARTIFACT_DIR = root / "bulk"
+            now = time.time()
+            server.bulk_jobs = {
+                "queued": {"status": "queued", "created_at": now, "updated_at": now},
+                "done": {"status": "completed", "created_at": now, "updated_at": now},
+                "failed": {"status": "failed", "created_at": now, "updated_at": now},
+            }
+            server.remember_failure("conversion_failed", r"C:\private\source.xlsx failed", "source.xlsx")
+            try:
+                response = self.client.get("/api/diagnostics", headers=self.auth_headers)
+            finally:
+                server.CONVERSION_ARTIFACT_DIR = original_conversion_dir
+                server.BULK_ARTIFACT_DIR = original_bulk_dir
+                server.bulk_jobs = original_jobs
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        payload_text = json.dumps(payload)
+        self.assertIn(payload["status"], {"ok", "degraded"})
+        self.assertIn("bad_deployment", payload["failure_classes"])
+        self.assertEqual(payload["bulk_jobs"]["tracked"], 3)
+        self.assertEqual(payload["bulk_jobs"]["active"], 1)
+        self.assertEqual(payload["recent_failures"][0]["category"], "conversion_failed")
+        self.assertEqual(payload["recent_failures"][0]["source_extension"], ".xlsx")
+        self.assertNotIn(str(root), payload_text)
+        self.assertNotIn("C:\\private", payload_text)
+        self.assertNotIn(server.APP_TOKEN, payload_text)
+
+    def test_conversion_failure_is_available_in_diagnostics(self):
+        original_engine = server.md_engine
+
+        class FailingEngine:
+            def convert(self, path):
+                raise RuntimeError("engine exploded")
+
+        server.md_engine = FailingEngine()
+        try:
+            response = self.client.post(
+                "/api/convert",
+                headers=self.auth_headers,
+                data={"engine": "standard"},
+                files={"file": ("sample.txt", b"hello", "text/plain")},
+            )
+            self.assertEqual(response.status_code, 500)
+
+            diagnostics = self.client.get("/api/diagnostics", headers=self.auth_headers).json()
+        finally:
+            server.md_engine = original_engine
+
+        self.assertEqual(diagnostics["recent_failures"][0]["category"], "conversion_failed")
+        self.assertEqual(diagnostics["recent_failures"][0]["source_extension"], ".txt")
+        self.assertIn("engine exploded", diagnostics["recent_failures"][0]["message"])
 
     def test_bulk_conversion_returns_manifest_and_authenticated_zip(self):
         original_engine = server.md_engine

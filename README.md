@@ -141,6 +141,34 @@ The ZIP contains one Markdown file per successful source file plus `batch-result
 
 ---
 
+## Diagnostics
+
+For demo prep or troubleshooting, generate a small redacted failure packet:
+
+```powershell
+python tools/doctor.py
+```
+
+The same packet is available from the authenticated API:
+
+```http
+GET /api/diagnostics
+X-MD-Creator-Token: <local session token>
+```
+
+Diagnostics classify likely failure areas without exposing raw local paths:
+
+- `bad_deployment`
+- `artifact_degraded`
+- `provider_failed`
+- `cap_tripped`
+- `api_failed`
+- `conversion_failed`
+
+The packet includes runtime state, dependency availability, artifact directory health, upload limits, bulk job counts, spreadsheet guardrails, and recent failures.
+
+---
+
 ## Batch Conversion
 
 Double-click `batch.bat` for the folder workflow:
