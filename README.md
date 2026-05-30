@@ -294,7 +294,3 @@ Downloads the completed bulk ZIP artifact. Requires the same `X-MD-Creator-Token
 | **Fonts** | [Inter](https://rsms.me/inter/) + [JetBrains Mono](https://www.jetbrains.com/lp/mono/) | Typography |
 
 ---
-
-## License
-
-MIT
