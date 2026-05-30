@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
+from markdown_cleanup import normalize_markdown_for_source
 from spreadsheet_convert import (
     SpreadsheetConversionOptions,
     convert_spreadsheet_to_path,
@@ -303,7 +304,7 @@ def _convert_source(source: Path, engine: str, get_markitdown: Callable, get_min
 
 def _convert_standard(source: Path, get_markitdown: Callable) -> str:
     result = get_markitdown().convert(str(source))
-    return result.text_content or ""
+    return normalize_markdown_for_source(result.text_content or "", source)
 
 
 def _target_path(source: Path, input_path: Path, output_path: Path) -> Path:

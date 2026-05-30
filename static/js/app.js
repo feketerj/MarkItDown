@@ -8,12 +8,18 @@
 
   // ── Config ──
   const API_CONVERT = '/api/convert';
+  const API_BULK_CONVERT = '/api/bulk/convert';
+  const API_BULK_JOB = '/api/bulk/jobs';
   const API_FORMATS = '/api/formats';
   const API_TOKEN = document.querySelector('meta[name="mdcreator-token"]')?.content || '';
   const HISTORY_KEY = 'mdcreator_history';
   const MAX_HISTORY = 20;
   const HISTORY_MARKDOWN_LIMIT = 1024 * 1024;
   const PREVIEW_RENDER_LIMIT = 500 * 1024;
+  const MAX_SINGLE_FILE_SIZE = 50 * 1024 * 1024;
+  const MAX_BULK_FILES = 200;
+  const MAX_BULK_TOTAL_SIZE = 500 * 1024 * 1024;
+  const BULK_POLL_INTERVAL_MS = 900;
 
   // ── State ──
   let currentMarkdown = '';
@@ -21,6 +27,10 @@
   let currentDownloadId = '';
   let currentMarkdownIsPreview = false;
   let selectedEngine = 'standard';
+  let selectedBulkEngine = 'standard';
+  let bulkFiles = [];
+  let bulkJob = null;
+  let bulkPollTimer = null;
 
   // ── markdown-it instance ──
   const mdit = window.markdownit({
@@ -51,24 +61,72 @@
   const historyOverlay = $('#history-overlay');
   const historyList = $('#history-list');
   const formatBadges = $('#format-badges');
+  const singleWorkflow = $('#single-workflow');
+  const bulkWorkflow = $('#bulk-workflow');
+  const btnSingleView = $('#btn-single-view');
+  const btnBulkView = $('#btn-bulk-view');
+  const bulkDropZone = $('#bulk-drop-zone');
+  const bulkFileInput = $('#bulk-file-input');
+  const bulkFolderInput = $('#bulk-folder-input');
+  const bulkBrowseFiles = $('#bulk-browse-files');
+  const bulkBrowseFolder = $('#bulk-browse-folder');
+  const bulkSelected = $('#bulk-selected');
+  const bulkCount = $('#bulk-count');
+  const bulkSize = $('#bulk-size');
+  const bulkFileList = $('#bulk-file-list');
+  const bulkProgress = $('#bulk-progress');
+  const bulkStatusText = $('#bulk-status-text');
+  const bulkStatusDetail = $('#bulk-status-detail');
+  const bulkResults = $('#bulk-results');
+  const bulkResultsTitle = $('#bulk-results-title');
+  const bulkResultsConverted = $('#bulk-results-converted');
+  const bulkResultsFailed = $('#bulk-results-failed');
+  const bulkResultsTotal = $('#bulk-results-total');
+  const bulkResultList = $('#bulk-result-list');
+  const btnBulkClear = $('#btn-bulk-clear');
+  const btnBulkConvert = $('#btn-bulk-convert');
+  const btnBulkDownload = $('#btn-bulk-download');
+  const btnBulkNew = $('#btn-bulk-new');
 
   // ── Init ──
   function init() {
     loadFormats();
+    setupViewSwitching();
     setupEngineSelector();
     setupDragDrop();
+    setupBulkWorkflow();
     setupButtons();
     setupTabs();
     setupHistory();
   }
 
+  // ── View Switching ──
+  function setupViewSwitching() {
+    btnSingleView.addEventListener('click', () => showWorkflow('single'));
+    btnBulkView.addEventListener('click', () => showWorkflow('bulk'));
+  }
+
+  function showWorkflow(mode) {
+    const isBulk = mode === 'bulk';
+    singleWorkflow.classList.toggle('active', !isBulk);
+    bulkWorkflow.classList.toggle('active', isBulk);
+    btnSingleView.classList.toggle('active', !isBulk);
+    btnBulkView.classList.toggle('active', isBulk);
+  }
+
   // ── Engine Selector ──
   function setupEngineSelector() {
-    document.querySelectorAll('.engine-option').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.engine-option').forEach((b) => b.classList.remove('active'));
-        btn.classList.add('active');
-        selectedEngine = btn.dataset.engine;
+    document.querySelectorAll('.engine-selector').forEach((selector) => {
+      selector.querySelectorAll('.engine-option').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          selector.querySelectorAll('.engine-option').forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+          if (selector.id === 'bulk-engine-selector') {
+            selectedBulkEngine = btn.dataset.engine;
+          } else {
+            selectedEngine = btn.dataset.engine;
+          }
+        });
       });
     });
   }
@@ -118,20 +176,275 @@
   }
 
   function openFilePicker() {
-    if (typeof fileInput.showPicker === 'function') {
+    openPicker(fileInput);
+  }
+
+  function openPicker(input) {
+    if (typeof input.showPicker === 'function') {
       try {
-        fileInput.showPicker();
+        input.showPicker();
         return;
       } catch {
         // Fall back for browsers that expose showPicker but reject it here.
       }
     }
-    fileInput.click();
+    input.click();
+  }
+
+  // ── Bulk Workflow ──
+  function setupBulkWorkflow() {
+    ['dragenter', 'dragover'].forEach((evt) =>
+      bulkDropZone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        bulkDropZone.classList.add('drag-over');
+      })
+    );
+    ['dragleave', 'drop'].forEach((evt) =>
+      bulkDropZone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        bulkDropZone.classList.remove('drag-over');
+      })
+    );
+
+    bulkDropZone.addEventListener('drop', (e) => addBulkFiles(e.dataTransfer.files));
+    bulkDropZone.addEventListener('click', () => openPicker(bulkFileInput));
+    bulkBrowseFiles.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openPicker(bulkFileInput);
+    });
+    bulkBrowseFolder.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openPicker(bulkFolderInput);
+    });
+    bulkFileInput.addEventListener('change', () => {
+      addBulkFiles(bulkFileInput.files);
+      bulkFileInput.value = '';
+    });
+    bulkFolderInput.addEventListener('change', () => {
+      addBulkFiles(bulkFolderInput.files);
+      bulkFolderInput.value = '';
+    });
+    btnBulkClear.addEventListener('click', clearBulkFiles);
+    btnBulkConvert.addEventListener('click', startBulkConversion);
+    btnBulkDownload.addEventListener('click', downloadBulkZip);
+    btnBulkNew.addEventListener('click', () => {
+      clearBulkFiles();
+      bulkResults.classList.remove('active');
+    });
+  }
+
+  function addBulkFiles(fileList) {
+    if (bulkProgress.classList.contains('active')) {
+      showToast('Bulk conversion is already running.', 'error');
+      return;
+    }
+
+    const incoming = Array.from(fileList || []);
+    if (incoming.length === 0) return;
+    bulkJob = null;
+    bulkResults.classList.remove('active');
+
+    const currentPaths = new Set(bulkFiles.map((item) => item.path));
+    const nextFiles = [...bulkFiles];
+    let skipped = 0;
+
+    incoming.forEach((file) => {
+      if (file.size > MAX_SINGLE_FILE_SIZE) {
+        skipped += 1;
+        return;
+      }
+      const path = normalizeClientRelativePath(file.webkitRelativePath || file.name);
+      if (!path || currentPaths.has(path)) {
+        skipped += 1;
+        return;
+      }
+      currentPaths.add(path);
+      nextFiles.push({ file, path });
+    });
+
+    if (nextFiles.length > MAX_BULK_FILES) {
+      bulkFiles = nextFiles.slice(0, MAX_BULK_FILES);
+      skipped += nextFiles.length - MAX_BULK_FILES;
+      showToast(`Bulk batches are limited to ${MAX_BULK_FILES} files. Extra files were skipped.`, 'error');
+    } else {
+      bulkFiles = nextFiles;
+    }
+
+    if (bulkTotalSize() > MAX_BULK_TOTAL_SIZE) {
+      bulkFiles = [];
+      showToast('Batch too large — max 500MB total. Select a smaller set.', 'error');
+    } else if (skipped > 0) {
+      showToast(`${skipped} file${skipped === 1 ? '' : 's'} skipped due to size or duplicate path.`, 'error');
+    }
+
+    renderBulkSelection();
+  }
+
+  function normalizeClientRelativePath(path) {
+    return String(path || '')
+      .replace(/\\/g, '/')
+      .replace(/^\/+/, '')
+      .split('/')
+      .filter((part) => part && part !== '.' && part !== '..' && !part.includes(':'))
+      .join('/');
+  }
+
+  function bulkTotalSize() {
+    return bulkFiles.reduce((sum, item) => sum + item.file.size, 0);
+  }
+
+  function clearBulkFiles() {
+    bulkFiles = [];
+    bulkJob = null;
+    if (bulkPollTimer) clearTimeout(bulkPollTimer);
+    bulkPollTimer = null;
+    bulkProgress.classList.remove('active');
+    bulkSelected.classList.remove('active');
+    renderBulkSelection();
+  }
+
+  function renderBulkSelection() {
+    const totalSize = bulkTotalSize();
+    bulkSelected.classList.toggle('active', bulkFiles.length > 0);
+    bulkCount.textContent = bulkFiles.length === 0
+      ? 'No files selected'
+      : `${bulkFiles.length} file${bulkFiles.length === 1 ? '' : 's'} selected`;
+    bulkSize.textContent = formatBytes(totalSize);
+    btnBulkConvert.disabled = bulkFiles.length === 0;
+    bulkFileList.innerHTML = bulkFiles
+      .map(
+        (item) => `
+        <div class="bulk-file-item">
+          <div class="bulk-file-name">${escapeHtml(item.path)}</div>
+          <div class="bulk-file-size">${formatBytes(item.file.size)}</div>
+        </div>`
+      )
+      .join('');
+  }
+
+  async function startBulkConversion() {
+    if (bulkFiles.length === 0) return;
+
+    if (bulkPollTimer) clearTimeout(bulkPollTimer);
+    bulkResults.classList.remove('active');
+    bulkProgress.classList.add('active');
+    bulkStatusText.textContent = 'Uploading bulk conversion job...';
+    bulkStatusDetail.textContent = `${bulkFiles.length} files · ${formatBytes(bulkTotalSize())}`;
+    btnBulkConvert.disabled = true;
+
+    const formData = new FormData();
+    formData.append('engine', selectedBulkEngine);
+    bulkFiles.forEach((item) => {
+      formData.append('files', item.file, item.file.name);
+      formData.append('paths', item.path);
+    });
+
+    try {
+      const res = await fetchWithServerHint(API_BULK_CONVERT, {
+        method: 'POST',
+        body: formData,
+        headers: { 'X-MD-Creator-Token': API_TOKEN },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || 'Bulk conversion failed');
+      }
+      bulkJob = data.job;
+      renderBulkJob(bulkJob);
+      pollBulkJob(bulkJob.id);
+    } catch (err) {
+      bulkProgress.classList.remove('active');
+      btnBulkConvert.disabled = bulkFiles.length === 0;
+      showToast(err.message || 'Bulk conversion failed', 'error');
+    }
+  }
+
+  async function pollBulkJob(jobId) {
+    try {
+      const res = await fetchWithServerHint(`${API_BULK_JOB}/${encodeURIComponent(jobId)}`, {
+        headers: { 'X-MD-Creator-Token': API_TOKEN },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || 'Could not read bulk job status');
+      }
+      bulkJob = data.job;
+      renderBulkJob(bulkJob);
+      if (bulkJob.status === 'queued' || bulkJob.status === 'running') {
+        bulkPollTimer = setTimeout(() => pollBulkJob(jobId), BULK_POLL_INTERVAL_MS);
+      }
+    } catch (err) {
+      bulkProgress.classList.remove('active');
+      showToast(err.message || 'Could not read bulk job status', 'error');
+    }
+  }
+
+  function renderBulkJob(job) {
+    if (job.status === 'queued' || job.status === 'running') {
+      bulkProgress.classList.add('active');
+      bulkStatusText.textContent = job.status === 'queued' ? 'Waiting to start...' : 'Converting files...';
+      bulkStatusDetail.textContent = `${job.file_count || bulkFiles.length} files · ${formatBytes(job.total_size || bulkTotalSize())}`;
+      return;
+    }
+
+    bulkProgress.classList.remove('active');
+    btnBulkConvert.disabled = bulkFiles.length === 0;
+
+    if (job.status === 'failed') {
+      showToast(job.error || 'Bulk conversion failed', 'error');
+      return;
+    }
+
+    renderBulkResults(job);
+  }
+
+  function renderBulkResults(job) {
+    const summary = job.summary || {};
+    const failed = summary.failed || 0;
+    bulkResults.classList.add('active');
+    bulkResultsTitle.textContent = job.download_filename || 'Bulk conversion';
+    bulkResultsConverted.textContent = `${summary.converted || 0} converted`;
+    bulkResultsFailed.textContent = `${failed} failed`;
+    bulkResultsTotal.textContent = `${summary.total || 0} total`;
+    btnBulkDownload.disabled = !job.download_url;
+    bulkResultList.innerHTML = (summary.results || [])
+      .map((item) => {
+        const status = item.status || 'unknown';
+        const detail = item.error || item.warning || item.output || status;
+        return `
+          <div class="bulk-result-item ${escapeHtml(status)}">
+            <div class="bulk-result-name">${escapeHtml(item.source || item.output || 'unknown')}</div>
+            <div class="bulk-result-meta">${escapeHtml(status)} · ${formatBytes(item.file_size || 0)}</div>
+            ${item.error ? `<div class="bulk-result-error">${escapeHtml(detail)}</div>` : ''}
+          </div>`;
+      })
+      .join('');
+    showToast(failed > 0 ? `Bulk finished with ${failed} failed file${failed === 1 ? '' : 's'}.` : 'Bulk conversion complete!', failed > 0 ? 'error' : 'success');
+  }
+
+  async function downloadBulkZip() {
+    if (!bulkJob || !bulkJob.download_url) return;
+    try {
+      const res = await fetchWithServerHint(bulkJob.download_url, {
+        headers: { 'X-MD-Creator-Token': API_TOKEN },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || 'Bulk download failed');
+      }
+      const blob = await res.blob();
+      triggerDownload(blob, bulkJob.download_filename || 'mdcreator-bulk.zip');
+      showToast('Bulk ZIP downloaded! 💾', 'success');
+    } catch (err) {
+      showToast(err.message || 'Bulk download failed', 'error');
+    }
   }
 
   // ── Convert File ──
   async function convertFile(file) {
-    if (file.size > 50 * 1024 * 1024) {
+    if (file.size > MAX_SINGLE_FILE_SIZE) {
       showToast('File too large — max 50MB', 'error');
       return;
     }

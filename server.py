@@ -7,13 +7,15 @@ import asyncio
 import html
 import os
 import secrets
+import shutil
 import time
 import tempfile
 import traceback
 import warnings
+import zipfile
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, UploadFile, File, Form, Header, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,7 +36,9 @@ warnings.filterwarnings(
     module="onnxruntime.capi.onnxruntime_validation",
 )
 
+from batch_convert import BatchConfigurationError, run_batch
 from markitdown import MarkItDown
+from markdown_cleanup import normalize_markdown_for_source
 from spreadsheet_convert import (
     SpreadsheetConversionError,
     SpreadsheetConversionOptions,
@@ -65,6 +69,15 @@ CONVERSION_ARTIFACT_DIR = Path(
     )
 )
 CONVERSION_ARTIFACT_TTL_SECONDS = max(60, int(os.getenv("CONVERSION_ARTIFACT_TTL_SECONDS", "3600")))
+BULK_ARTIFACT_DIR = Path(
+    os.getenv(
+        "BULK_ARTIFACT_DIR",
+        str(Path(tempfile.gettempdir()) / "mdcreator_bulk_jobs"),
+    )
+)
+BULK_ARTIFACT_TTL_SECONDS = max(60, int(os.getenv("BULK_ARTIFACT_TTL_SECONDS", "3600")))
+BULK_MAX_FILES = max(1, int(os.getenv("BULK_MAX_FILES", "200")))
+BULK_MAX_TOTAL_SIZE = max(50 * 1024 * 1024, int(os.getenv("BULK_MAX_TOTAL_SIZE", str(500 * 1024 * 1024))))
 SPREADSHEET_OPTIONS = SpreadsheetConversionOptions(
     preview_rows_per_sheet=max(1, int(os.getenv("SPREADSHEET_PREVIEW_ROWS_PER_SHEET", "100"))),
     preview_max_chars=max(1, int(os.getenv("SPREADSHEET_PREVIEW_MAX_CHARS", "500000"))),
@@ -134,6 +147,7 @@ MAX_FILE_SIZE = 50 * 1024 * 1024
 MAX_REQUEST_SIZE = MAX_FILE_SIZE + (1024 * 1024)
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 conversion_semaphore = asyncio.Semaphore(CONVERSION_CONCURRENCY)
+bulk_jobs: dict[str, dict] = {}
 
 # Supported formats metadata
 SUPPORTED_FORMATS = [
@@ -165,10 +179,10 @@ SUPPORTED_FORMATS = [
 ]
 
 
-async def run_converter(func, *args):
+async def run_converter(func, *args, **kwargs):
     """Run blocking converter SDK calls without blocking the event loop."""
     async with conversion_semaphore:
-        return await run_in_threadpool(func, *args)
+        return await run_in_threadpool(func, *args, **kwargs)
 
 
 def cleanup_conversion_artifacts() -> None:
@@ -202,6 +216,201 @@ def resolve_conversion_artifact_path(artifact_id: str) -> Path | None:
     return path
 
 
+def cleanup_bulk_artifacts() -> None:
+    """Remove expired bulk job directories and stale in-memory records."""
+    BULK_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - BULK_ARTIFACT_TTL_SECONDS
+
+    for job_id, job in list(bulk_jobs.items()):
+        if job.get("status") in {"queued", "running"}:
+            continue
+        if float(job.get("updated_at", job.get("created_at", 0))) < cutoff:
+            bulk_jobs.pop(job_id, None)
+
+    for path in BULK_ARTIFACT_DIR.iterdir():
+        try:
+            if path.name in bulk_jobs and bulk_jobs[path.name].get("status") in {"queued", "running"}:
+                continue
+            if path.stat().st_mtime >= cutoff:
+                continue
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def create_bulk_job_paths() -> tuple[str, Path, Path, Path, Path]:
+    cleanup_bulk_artifacts()
+    BULK_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    job_id = secrets.token_urlsafe(24)
+    job_dir = BULK_ARTIFACT_DIR / job_id
+    input_dir = job_dir / "input"
+    output_dir = job_dir / "output"
+    zip_path = job_dir / "converted.zip"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return job_id, job_dir, input_dir, output_dir, zip_path
+
+
+def resolve_bulk_job_dir(job_id: str) -> Path | None:
+    if not job_id or not all(ch.isalnum() or ch in {"-", "_"} for ch in job_id):
+        return None
+    root = BULK_ARTIFACT_DIR.resolve()
+    path = (root / job_id).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None
+    return path
+
+
+def safe_bulk_relative_path(raw_path: str | None, fallback_filename: str | None) -> Path:
+    candidate = (raw_path or fallback_filename or "upload").replace("\\", "/").strip().lstrip("/")
+    if not candidate:
+        candidate = fallback_filename or "upload"
+
+    parts = [part.strip() for part in candidate.split("/") if part.strip()]
+    invalid = (
+        not parts
+        or any(part in {".", ".."} for part in parts)
+        or any(":" in part or "\x00" in part for part in parts)
+    )
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Invalid upload path: {raw_path or fallback_filename}")
+
+    return Path(*parts)
+
+
+async def save_bulk_uploads(files: list[UploadFile], paths: list[str] | None, input_dir: Path) -> tuple[int, int]:
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > BULK_MAX_FILES:
+        raise HTTPException(status_code=413, detail=f"Too many files. Maximum batch size is {BULK_MAX_FILES} files.")
+
+    root = input_dir.resolve()
+    seen_paths: set[str] = set()
+    total_size = 0
+
+    for index, upload in enumerate(files):
+        if not upload.filename:
+            raise HTTPException(status_code=400, detail="Every uploaded file must include a filename")
+
+        raw_path = paths[index] if paths and index < len(paths) else None
+        relative_path = safe_bulk_relative_path(raw_path, upload.filename)
+        relative_label = relative_path.as_posix()
+        if relative_label in seen_paths:
+            raise HTTPException(status_code=400, detail=f"Duplicate upload path: {relative_label}")
+        seen_paths.add(relative_label)
+
+        target_path = (root / relative_path).resolve()
+        try:
+            target_path.relative_to(root)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid upload path: {relative_label}")
+
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            file_size = 0
+            with target_path.open("wb") as target:
+                while True:
+                    chunk = await upload.read(UPLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    file_size += len(chunk)
+                    total_size += len(chunk)
+                    if file_size > MAX_FILE_SIZE:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"{upload.filename} is too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB per file.",
+                        )
+                    if total_size > BULK_MAX_TOTAL_SIZE:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Batch too large. Maximum total upload size is {BULK_MAX_TOTAL_SIZE // (1024*1024)}MB.",
+                        )
+                    target.write(chunk)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"Could not save upload path {relative_label}: {exc}")
+
+    return len(files), total_size
+
+
+def public_bulk_job_state(job: dict) -> dict:
+    state = {
+        "id": job["id"],
+        "status": job["status"],
+        "engine": job["engine"],
+        "file_count": job.get("file_count", 0),
+        "total_size": job.get("total_size", 0),
+        "created_at": job["created_at"],
+        "updated_at": job["updated_at"],
+        "summary": job.get("summary"),
+        "error": job.get("error"),
+    }
+    if job.get("status") == "completed":
+        state["download_id"] = job["id"]
+        state["download_filename"] = job.get("download_filename", "mdcreator-bulk.zip")
+        state["download_url"] = f"/api/bulk/jobs/{job['id']}/download"
+    return state
+
+
+def create_bulk_zip(output_dir: Path, zip_path: Path) -> None:
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=".zip",
+            prefix=f".{zip_path.stem}.",
+            dir=zip_path.parent,
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(item for item in output_dir.rglob("*") if item.is_file()):
+                archive.write(path, path.relative_to(output_dir).as_posix())
+
+        os.replace(tmp_path, zip_path)
+    finally:
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+async def run_bulk_conversion_job(job_id: str) -> None:
+    job = bulk_jobs.get(job_id)
+    if job is None:
+        return
+
+    job["status"] = "running"
+    job["updated_at"] = time.time()
+    try:
+        summary = await run_converter(
+            run_batch,
+            Path(job["input_dir"]),
+            Path(job["output_dir"]),
+            engine=job["engine"],
+            overwrite=True,
+            max_file_size=MAX_FILE_SIZE,
+            md_engine=md_engine,
+            mineru_client=mineru_client,
+            spreadsheet_options=SPREADSHEET_OPTIONS,
+        )
+        create_bulk_zip(Path(job["output_dir"]), Path(job["zip_path"]))
+        job["summary"] = summary.to_dict()
+        job["status"] = "completed"
+        job["download_filename"] = f"mdcreator-bulk-{job_id[:8]}.zip"
+    except BatchConfigurationError as exc:
+        job["status"] = "failed"
+        job["error"] = str(exc)
+    except Exception as exc:
+        traceback.print_exc()
+        job["status"] = "failed"
+        job["error"] = f"Bulk conversion failed: {exc}"
+    finally:
+        job["updated_at"] = time.time()
+
+
 # ── API Routes ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/formats")
@@ -225,6 +434,7 @@ async def get_health():
             },
             "mineru_available": MINERU_AVAILABLE,
             "spreadsheet_converter": True,
+            "bulk_converter": True,
         }
     )
 
@@ -253,6 +463,117 @@ async def download_conversion_artifact(
         artifact_path,
         media_type="text/markdown; charset=utf-8",
         filename="converted.md",
+    )
+
+
+@app.post("/api/bulk/convert")
+async def create_bulk_conversion(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    paths: list[str] | None = Form(None),
+    engine: str = Form("standard"),
+    x_mdcreator_token: str = Header(default="", alias="X-MD-Creator-Token"),
+):
+    """Create a temporary bulk conversion job from uploaded files."""
+    if not secrets.compare_digest(x_mdcreator_token, APP_TOKEN):
+        raise HTTPException(status_code=403, detail="Invalid local session token")
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > BULK_MAX_TOTAL_SIZE + (len(files) * 1024 * 1024):
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Batch too large. Maximum total upload size is {BULK_MAX_TOTAL_SIZE // (1024*1024)}MB.",
+                )
+        except ValueError:
+            pass
+
+    engine_used = engine.lower()
+    if engine_used not in {"standard", "academic", "auto"}:
+        engine_used = "standard"
+
+    job_id, job_dir, input_dir, output_dir, zip_path = create_bulk_job_paths()
+    now = time.time()
+    bulk_jobs[job_id] = {
+        "id": job_id,
+        "status": "queued",
+        "engine": engine_used,
+        "created_at": now,
+        "updated_at": now,
+        "file_count": 0,
+        "total_size": 0,
+        "job_dir": str(job_dir),
+        "input_dir": str(input_dir),
+        "output_dir": str(output_dir),
+        "zip_path": str(zip_path),
+        "summary": None,
+        "error": None,
+    }
+
+    try:
+        file_count, total_size = await save_bulk_uploads(files, paths, input_dir)
+        bulk_jobs[job_id]["file_count"] = file_count
+        bulk_jobs[job_id]["total_size"] = total_size
+        bulk_jobs[job_id]["updated_at"] = time.time()
+    except HTTPException:
+        bulk_jobs.pop(job_id, None)
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise
+
+    background_tasks.add_task(run_bulk_conversion_job, job_id)
+    return JSONResponse(
+        status_code=202,
+        content={"job": public_bulk_job_state(bulk_jobs[job_id])},
+        background=background_tasks,
+    )
+
+
+@app.get("/api/bulk/jobs/{job_id}")
+async def get_bulk_conversion_job(
+    job_id: str,
+    x_mdcreator_token: str = Header(default="", alias="X-MD-Creator-Token"),
+):
+    """Return current bulk conversion job state."""
+    if not secrets.compare_digest(x_mdcreator_token, APP_TOKEN):
+        raise HTTPException(status_code=403, detail="Invalid local session token")
+
+    cleanup_bulk_artifacts()
+    if resolve_bulk_job_dir(job_id) is None:
+        raise HTTPException(status_code=404, detail="Bulk job not found")
+    job = bulk_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Bulk job not found")
+    return JSONResponse(content={"job": public_bulk_job_state(job)})
+
+
+@app.get("/api/bulk/jobs/{job_id}/download")
+async def download_bulk_conversion_job(
+    job_id: str,
+    x_mdcreator_token: str = Header(default="", alias="X-MD-Creator-Token"),
+):
+    """Download a completed bulk conversion ZIP artifact."""
+    if not secrets.compare_digest(x_mdcreator_token, APP_TOKEN):
+        raise HTTPException(status_code=403, detail="Invalid local session token")
+
+    cleanup_bulk_artifacts()
+    if resolve_bulk_job_dir(job_id) is None:
+        raise HTTPException(status_code=404, detail="Bulk job not found")
+    job = bulk_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Bulk job not found")
+    if job.get("status") != "completed":
+        raise HTTPException(status_code=409, detail="Bulk job is not complete")
+
+    zip_path = Path(job["zip_path"])
+    if not zip_path.exists():
+        raise HTTPException(status_code=404, detail="Bulk download is no longer available")
+
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=job.get("download_filename", "mdcreator-bulk.zip"),
     )
 
 
@@ -349,7 +670,7 @@ async def convert_file(
                 # Fallback to MarkItDown
                 traceback.print_exc()
                 result = await run_converter(md_engine.convert, tmp_path)
-                markdown_text = result.text_content or ""
+                markdown_text = normalize_markdown_for_source(result.text_content or "", file.filename)
                 engine_used = "standard"
                 fallback_warning = f"MinerU failed ({str(mineru_err)[:80]}), fell back to Standard."
 
@@ -360,13 +681,13 @@ async def convert_file(
             elif ext != ".pdf":
                 fallback_warning = "Academic engine only supports PDF. Using Standard."
             result = await run_converter(md_engine.convert, tmp_path)
-            markdown_text = result.text_content or ""
+            markdown_text = normalize_markdown_for_source(result.text_content or "", file.filename)
             engine_used = "standard"
 
         # ── Standard engine (MarkItDown) ──
         else:
             result = await run_converter(md_engine.convert, tmp_path)
-            markdown_text = result.text_content or ""
+            markdown_text = normalize_markdown_for_source(result.text_content or "", file.filename)
 
         elapsed = round(time.time() - start_time, 2)
 

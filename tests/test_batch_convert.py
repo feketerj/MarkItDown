@@ -159,6 +159,63 @@ class BatchConvertTests(unittest.TestCase):
             self.assertIn("| Name | Value |", markdown)
             self.assertIn("| Bob | 2 |", markdown)
 
+    def test_batch_pptx_rewrites_slide_markers(self):
+        class SlideEngine:
+            def convert(self, path):
+                return SimpleNamespace(
+                    text_content="<!-- Slide number: 1 -->\nTitle\n\n<!-- Slide number: 2 -->\nBody"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            (input_dir / "slides.pptx").write_text("deck", encoding="utf-8")
+
+            summary = batch_convert.run_batch(
+                input_dir,
+                output_dir,
+                engine="standard",
+                md_engine=SlideEngine(),
+            )
+
+            self.assertEqual(summary.converted, 1)
+            markdown = (output_dir / "slides.md").read_text(encoding="utf-8")
+            self.assertIn("### Slide Number: 1\n\nTitle", markdown)
+            self.assertIn("\n---\n\n### Slide Number: 2\n\nBody", markdown)
+            self.assertNotIn("<!-- Slide number", markdown)
+            self.assertFalse(markdown.startswith("---"))
+
+    def test_real_pptx_conversion_uses_notebook_safe_slide_markers(self):
+        try:
+            from pptx import Presentation
+        except ImportError:
+            self.skipTest("python-pptx is not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            source = input_dir / "real-slides.pptx"
+
+            deck = Presentation()
+            for index in range(1, 3):
+                slide = deck.slides.add_slide(deck.slide_layouts[5])
+                slide.shapes.title.text = f"Real Slide {index}"
+            deck.save(source)
+
+            summary = batch_convert.run_batch(input_dir, output_dir, engine="standard")
+
+            self.assertEqual(summary.converted, 1)
+            self.assertEqual(summary.failed, 0)
+            markdown = (output_dir / "real-slides.md").read_text(encoding="utf-8")
+            self.assertTrue(markdown.startswith("### Slide Number: 1"))
+            self.assertIn("\n---\n\n### Slide Number: 2", markdown)
+            self.assertNotIn("<!-- Slide number", markdown)
+            self.assertFalse(markdown.startswith("---"))
+
     def test_reports_output_name_collisions(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
