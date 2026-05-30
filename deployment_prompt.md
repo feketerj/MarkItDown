@@ -24,6 +24,7 @@ It supports:
   ### Slide Number: N
 - Authenticated temporary download artifacts for large spreadsheet and bulk outputs.
 - A redacted diagnostics packet via tools/doctor.py and GET /api/diagnostics for fast failure classification during demos.
+- start.bat runs diagnostics automatically after dependency setup and before launching the server.
 
 ## Stack
 
@@ -60,6 +61,8 @@ It supports:
    ```powershell
    .\start.bat
    ```
+
+   The launcher writes `.doctor.json` during startup. It only blocks launch on a hard diagnostics failure. Set `MD_CREATOR_SKIP_DOCTOR=1` only when intentionally bypassing that preflight.
 
    Or run directly:
 

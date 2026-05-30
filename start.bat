@@ -13,6 +13,8 @@ set "VENV_PY=.venv\Scripts\python.exe"
 set "PID_FILE=.server.pid"
 set "STAMP_FILE=.deps_installed"
 set "LOCK_DIR=.start.lock"
+set "DOCTOR_REPORT=.doctor.json"
+set "DOCTOR_ERR=.doctor.err.log"
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$lock=Get-Item '.start.lock' -ErrorAction SilentlyContinue; if($lock -and $lock.LastWriteTime -lt (Get-Date).AddMinutes(-15)){ Remove-Item -LiteralPath '.start.lock' -Recurse -Force -ErrorAction SilentlyContinue }"
 mkdir "%LOCK_DIR%" >nul 2>&1
@@ -65,6 +67,23 @@ if errorlevel 1 (
     )
     echo installed>"%STAMP_FILE%"
 )
+
+if /i "%MD_CREATOR_SKIP_DOCTOR%"=="1" (
+    echo [WARN] Startup diagnostics skipped because MD_CREATOR_SKIP_DOCTOR=1.
+) else (
+    echo Running startup diagnostics...
+    del /f /q "%DOCTOR_ERR%" >nul 2>&1
+    "%VENV_PY%" tools\doctor.py --compact > "%DOCTOR_REPORT%" 2> "%DOCTOR_ERR%"
+    if errorlevel 1 (
+        echo [ERROR] Startup diagnostics failed.
+        echo See %DOCTOR_REPORT% and %DOCTOR_ERR% in this folder.
+        rmdir "%LOCK_DIR%" >nul 2>&1
+        pause
+        exit /b 1
+    )
+    echo [OK] Startup diagnostics passed. Report: %DOCTOR_REPORT%
+)
+echo.
 
 call stop.bat /quiet >nul 2>&1
 

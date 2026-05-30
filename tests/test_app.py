@@ -412,12 +412,24 @@ class LauncherGuardTests(unittest.TestCase):
         self.assertNotIn("No new browser window was opened.", start_script)
         self.assertIn("call stop.bat /quiet", start_script)
         self.assertIn('del /f /q "%PID_FILE%"', start_script)
+        self.assertIn('set "DOCTOR_REPORT=.doctor.json"', start_script)
+        self.assertIn('set "DOCTOR_ERR=.doctor.err.log"', start_script)
+        self.assertIn("tools\\doctor.py --compact", start_script)
+        self.assertIn("MD_CREATOR_SKIP_DOCTOR", start_script)
+        self.assertIn("Startup diagnostics failed", start_script)
+        self.assertIn("Startup diagnostics passed", start_script)
 
     def test_stop_script_suppresses_stale_taskkill_races(self):
         stop_script = Path("stop.bat").read_text(encoding="utf-8")
 
         self.assertIn("*> $null", stop_script)
         self.assertIn("No %APP_NAME% instance was running.", stop_script)
+
+    def test_runtime_diagnostics_artifacts_are_ignored(self):
+        gitignore = Path(".gitignore").read_text(encoding="utf-8")
+
+        self.assertIn(".doctor.json", gitignore)
+        self.assertIn(".doctor.err.log", gitignore)
 
 
 if __name__ == "__main__":

@@ -149,6 +149,13 @@ For demo prep or troubleshooting, generate a small redacted failure packet:
 python tools/doctor.py
 ```
 
+`start.bat` runs this same doctor automatically after dependency setup and before launching the server. It writes `.doctor.json` and blocks startup only when diagnostics returns a hard failure. To skip that preflight intentionally:
+
+```powershell
+$env:MD_CREATOR_SKIP_DOCTOR = "1"
+.\start.bat
+```
+
 The same packet is available from the authenticated API:
 
 ```http
