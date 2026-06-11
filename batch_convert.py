@@ -107,6 +107,7 @@ def run_batch(
     mineru_client=None,
     spreadsheet_options: SpreadsheetConversionOptions | None = None,
     report_name: str = "batch-results.json",
+    progress_callback: Callable[[int, int, str | None], None] | None = None,
 ) -> BatchSummary:
     engine = engine.lower()
     if engine not in VALID_ENGINES:
@@ -138,7 +139,18 @@ def run_batch(
             mineru_checked = True
         return mineru_client
 
-    for source, target in planned_files:
+    total_planned = len(planned_files)
+
+    def report_progress(done: int, current: str | None) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(done, total_planned, current)
+        except Exception:
+            pass
+
+    for index, (source, target) in enumerate(planned_files):
+        report_progress(index, _relative_posix(source, input_path))
         results.append(
             _convert_one(
                 source,
@@ -153,6 +165,7 @@ def run_batch(
                 spreadsheet_options,
             )
         )
+    report_progress(total_planned, None)
 
     summary = BatchSummary(report_path=str(report_path), results=results)
     _write_json_atomic(report_path, summary.to_dict())

@@ -11,7 +11,6 @@
   const API_BULK_CONVERT = '/api/bulk/convert';
   const API_BULK_JOB = '/api/bulk/jobs';
   const API_FORMATS = '/api/formats';
-  const API_TOKEN = document.querySelector('meta[name="mdcreator-token"]')?.content || '';
   const HISTORY_KEY = 'mdcreator_history';
   const MAX_HISTORY = 20;
   const HISTORY_MARKDOWN_LIMIT = 1024 * 1024;
@@ -22,6 +21,7 @@
   const BULK_POLL_INTERVAL_MS = 900;
 
   // ── State ──
+  let apiToken = document.querySelector('meta[name="mdcreator-token"]')?.content || '';
   let currentMarkdown = '';
   let currentFilename = '';
   let currentDownloadId = '';
@@ -161,6 +161,11 @@
       })
     );
     dropZone.addEventListener('drop', (e) => {
+      const entries = snapshotDropEntries(e.dataTransfer);
+      if (entries.some((entry) => entry && entry.isDirectory)) {
+        showToast('That is a folder — switch to the Bulk tab to convert whole folders.', 'error');
+        return;
+      }
       const file = e.dataTransfer.files[0];
       if (file) convertFile(file);
     });
@@ -208,7 +213,13 @@
       })
     );
 
-    bulkDropZone.addEventListener('drop', (e) => addBulkFiles(e.dataTransfer.files));
+    bulkDropZone.addEventListener('drop', (e) => {
+      // collectDroppedItems snapshots directory entries synchronously, then
+      // traverses dropped folders so they bulk-convert instead of erroring.
+      collectDroppedItems(e.dataTransfer)
+        .then((items) => addBulkFiles(items))
+        .catch(() => showToast('Could not read the dropped items. Try the browse buttons instead.', 'error'));
+    });
     bulkDropZone.addEventListener('click', () => openPicker(bulkFileInput));
     bulkBrowseFiles.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -219,11 +230,11 @@
       openPicker(bulkFolderInput);
     });
     bulkFileInput.addEventListener('change', () => {
-      addBulkFiles(bulkFileInput.files);
+      addBulkFiles(fileListToItems(bulkFileInput.files));
       bulkFileInput.value = '';
     });
     bulkFolderInput.addEventListener('change', () => {
-      addBulkFiles(bulkFolderInput.files);
+      addBulkFiles(fileListToItems(bulkFolderInput.files));
       bulkFolderInput.value = '';
     });
     btnBulkClear.addEventListener('click', clearBulkFiles);
@@ -235,14 +246,20 @@
     });
   }
 
-  function addBulkFiles(fileList) {
+  function fileListToItems(fileList) {
+    return Array.from(fileList || []).map((file) => ({
+      file,
+      path: normalizeClientRelativePath(file.webkitRelativePath || file.name),
+    }));
+  }
+
+  function addBulkFiles(incoming) {
     if (bulkProgress.classList.contains('active')) {
       showToast('Bulk conversion is already running.', 'error');
       return;
     }
 
-    const incoming = Array.from(fileList || []);
-    if (incoming.length === 0) return;
+    if (!incoming || incoming.length === 0) return;
     bulkJob = null;
     bulkResults.classList.remove('active');
 
@@ -250,12 +267,11 @@
     const nextFiles = [...bulkFiles];
     let skipped = 0;
 
-    incoming.forEach((file) => {
-      if (file.size > MAX_SINGLE_FILE_SIZE) {
+    incoming.forEach(({ file, path }) => {
+      if (!file || file.size > MAX_SINGLE_FILE_SIZE) {
         skipped += 1;
         return;
       }
-      const path = normalizeClientRelativePath(file.webkitRelativePath || file.name);
       if (!path || currentPaths.has(path)) {
         skipped += 1;
         return;
@@ -330,9 +346,30 @@
     if (bulkPollTimer) clearTimeout(bulkPollTimer);
     bulkResults.classList.remove('active');
     bulkProgress.classList.add('active');
-    bulkStatusText.textContent = 'Uploading bulk conversion job...';
+    bulkStatusText.textContent = 'Checking selected files...';
     bulkStatusDetail.textContent = `${bulkFiles.length} files · ${formatBytes(bulkTotalSize())}`;
     btnBulkConvert.disabled = true;
+
+    const unreadable = [];
+    for (const item of bulkFiles) {
+      if (!(await isFileReadable(item.file))) unreadable.push(item.path);
+    }
+    if (unreadable.length > 0) {
+      bulkFiles = bulkFiles.filter((item) => !unreadable.includes(item.path));
+      renderBulkSelection();
+      showToast(
+        `Skipped ${unreadable.length} unreadable item${unreadable.length === 1 ? '' : 's'} (folders or moved files): ${unreadable[0]}${unreadable.length > 1 ? ', …' : ''}`,
+        'error'
+      );
+      if (bulkFiles.length === 0) {
+        bulkProgress.classList.remove('active');
+        btnBulkConvert.disabled = true;
+        return;
+      }
+    }
+
+    bulkStatusText.textContent = 'Uploading bulk conversion job...';
+    bulkStatusDetail.textContent = `${bulkFiles.length} files · ${formatBytes(bulkTotalSize())}`;
 
     const formData = new FormData();
     formData.append('engine', selectedBulkEngine);
@@ -342,10 +379,9 @@
     });
 
     try {
-      const res = await fetchWithServerHint(API_BULK_CONVERT, {
+      const res = await apiFetch(API_BULK_CONVERT, {
         method: 'POST',
         body: formData,
-        headers: { 'X-MD-Creator-Token': API_TOKEN },
       });
       const data = await res.json();
       if (!res.ok) {
@@ -363,11 +399,12 @@
 
   async function pollBulkJob(jobId) {
     try {
-      const res = await fetchWithServerHint(`${API_BULK_JOB}/${encodeURIComponent(jobId)}`, {
-        headers: { 'X-MD-Creator-Token': API_TOKEN },
-      });
+      const res = await apiFetch(`${API_BULK_JOB}/${encodeURIComponent(jobId)}`);
       const data = await res.json();
       if (!res.ok) {
+        if (res.status === 404) {
+          throw new Error('This bulk job is no longer tracked (the server restarted). Re-run the batch.');
+        }
         throw new Error(data.detail || 'Could not read bulk job status');
       }
       bulkJob = data.job;
@@ -377,6 +414,7 @@
       }
     } catch (err) {
       bulkProgress.classList.remove('active');
+      btnBulkConvert.disabled = bulkFiles.length === 0;
       showToast(err.message || 'Could not read bulk job status', 'error');
     }
   }
@@ -384,8 +422,16 @@
   function renderBulkJob(job) {
     if (job.status === 'queued' || job.status === 'running') {
       bulkProgress.classList.add('active');
-      bulkStatusText.textContent = job.status === 'queued' ? 'Waiting to start...' : 'Converting files...';
-      bulkStatusDetail.textContent = `${job.file_count || bulkFiles.length} files · ${formatBytes(job.total_size || bulkTotalSize())}`;
+      const progress = job.progress;
+      if (job.status === 'queued') {
+        bulkStatusText.textContent = 'Waiting to start...';
+      } else if (progress && progress.total > 0) {
+        bulkStatusText.textContent = `Converting files... ${Math.min(progress.done, progress.total)}/${progress.total}`;
+      } else {
+        bulkStatusText.textContent = 'Converting files...';
+      }
+      const currentLabel = progress && progress.current ? ` · ${progress.current}` : '';
+      bulkStatusDetail.textContent = `${job.file_count || bulkFiles.length} files · ${formatBytes(job.total_size || bulkTotalSize())}${currentLabel}`;
       return;
     }
 
@@ -427,9 +473,7 @@
   async function downloadBulkZip() {
     if (!bulkJob || !bulkJob.download_url) return;
     try {
-      const res = await fetchWithServerHint(bulkJob.download_url, {
-        headers: { 'X-MD-Creator-Token': API_TOKEN },
-      });
+      const res = await apiFetch(bulkJob.download_url);
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.detail || 'Bulk download failed');
@@ -449,6 +493,11 @@
       return;
     }
 
+    if (!(await isFileReadable(file))) {
+      showToast(`Cannot read "${file.name}". If it is a folder, use the Bulk tab; otherwise check the file still exists.`, 'error');
+      return;
+    }
+
     showConverting(file.name);
 
     const formData = new FormData();
@@ -456,10 +505,9 @@
     formData.append('engine', selectedEngine);
 
     try {
-      const res = await fetchWithServerHint(API_CONVERT, {
+      const res = await apiFetch(API_CONVERT, {
         method: 'POST',
         body: formData,
-        headers: { 'X-MD-Creator-Token': API_TOKEN },
       });
       const data = await res.json();
 
@@ -549,9 +597,7 @@
       try {
         let blob;
         if (currentDownloadId) {
-          const res = await fetchWithServerHint(`/api/download/${encodeURIComponent(currentDownloadId)}`, {
-            headers: { 'X-MD-Creator-Token': API_TOKEN },
-          });
+          const res = await apiFetch(`/api/download/${encodeURIComponent(currentDownloadId)}`);
           if (!res.ok) {
             const data = await res.json().catch(() => ({}));
             throw new Error(data.detail || 'Download failed');
@@ -598,9 +644,107 @@
       return await fetch(url, options);
     } catch (err) {
       if (err instanceof TypeError) {
+        // Chrome reports a dead upload stream (folder pseudo-file, or a file
+        // deleted/changed after selection) the same way as a dead server.
+        // Probe health to tell the user the truth.
+        let serverUp = false;
+        try {
+          serverUp = (await fetch('/api/health', { cache: 'no-store' })).ok;
+        } catch {
+          // Server really is unreachable.
+        }
+        if (serverUp) {
+          throw new Error('Upload failed: a selected file changed or was deleted after it was picked. Re-select the files and try again.');
+        }
         throw new Error('Cannot reach the local converter server. Restart with start.bat, then refresh this page.');
       }
       throw err;
+    }
+  }
+
+  // The session token is minted per server start. If the server restarts while
+  // this tab stays open, re-read the token from the served page and retry once
+  // instead of stranding the user with 403s.
+  async function refreshApiToken() {
+    try {
+      const res = await fetch('/', { cache: 'no-store' });
+      const text = await res.text();
+      const match = text.match(/name="mdcreator-token" content="([^"]+)"/);
+      if (match && match[1] && match[1] !== '__MD_CREATOR_TOKEN__') {
+        apiToken = match[1];
+        return true;
+      }
+    } catch {
+      // Server unreachable — the caller's error path covers this.
+    }
+    return false;
+  }
+
+  async function apiFetch(url, options = {}) {
+    const send = () =>
+      fetchWithServerHint(url, {
+        ...options,
+        headers: { ...(options.headers || {}), 'X-MD-Creator-Token': apiToken },
+      });
+    let res = await send();
+    if (res.status === 403 && (await refreshApiToken())) {
+      res = await send();
+    }
+    return res;
+  }
+
+  // Folders dropped from Explorer arrive as unreadable pseudo-files; probing a
+  // one-byte slice catches them (and files deleted/moved since selection)
+  // before the upload dies mid-flight with a misleading network error.
+  async function isFileReadable(file) {
+    try {
+      await file.slice(0, 1).arrayBuffer();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function snapshotDropEntries(dataTransfer) {
+    // webkitGetAsEntry is only valid synchronously inside the drop event.
+    return Array.from(dataTransfer.items || []).map((item) =>
+      typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null
+    );
+  }
+
+  async function collectDroppedItems(dataTransfer) {
+    const entries = snapshotDropEntries(dataTransfer);
+    const plainFiles = Array.from(dataTransfer.files || []);
+    if (!entries.some(Boolean)) {
+      return plainFiles.map((file) => ({ file, path: normalizeClientRelativePath(file.name) }));
+    }
+    const collected = [];
+    for (const entry of entries) {
+      if (!entry) continue;
+      await walkDroppedEntry(entry, collected);
+      if (collected.length > MAX_BULK_FILES) break;
+    }
+    return collected;
+  }
+
+  async function walkDroppedEntry(entry, collected) {
+    if (collected.length > MAX_BULK_FILES) return;
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject)).catch(() => null);
+      if (file) {
+        collected.push({ file, path: normalizeClientRelativePath(entry.fullPath || file.name) });
+      }
+      return;
+    }
+    if (entry.isDirectory) {
+      const reader = entry.createReader();
+      while (collected.length <= MAX_BULK_FILES) {
+        const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject)).catch(() => []);
+        if (!batch.length) break;
+        for (const child of batch) {
+          await walkDroppedEntry(child, collected);
+        }
+      }
     }
   }
 

@@ -36,6 +36,50 @@ class BatchConvertTests(unittest.TestCase):
         self.assertIn('if "%OUTPUT_DIR%"=="" set "OUTPUT_DIR=output"', batch_script)
         self.assertIn('batch_convert.py" "%INPUT_DIR%" "%OUTPUT_DIR%" --engine academic', batch_script)
 
+    def test_progress_callback_reports_each_file_and_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            (input_dir / "a.txt").write_text("a", encoding="utf-8")
+            (input_dir / "b.txt").write_text("b", encoding="utf-8")
+            calls = []
+
+            batch_convert.run_batch(
+                input_dir,
+                output_dir,
+                engine="standard",
+                md_engine=StubMarkItDown(),
+                progress_callback=lambda done, total, current: calls.append((done, total, current)),
+            )
+
+            self.assertEqual(calls[0], (0, 2, "a.txt"))
+            self.assertEqual(calls[1], (1, 2, "b.txt"))
+            self.assertEqual(calls[-1], (2, 2, None))
+
+    def test_progress_callback_errors_do_not_break_the_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            (input_dir / "a.txt").write_text("a", encoding="utf-8")
+
+            def explode(done, total, current):
+                raise RuntimeError("progress observer crashed")
+
+            summary = batch_convert.run_batch(
+                input_dir,
+                output_dir,
+                engine="standard",
+                md_engine=StubMarkItDown(),
+                progress_callback=explode,
+            )
+
+            self.assertEqual(summary.converted, 1)
+            self.assertEqual(summary.failed, 0)
+
     def test_standard_batch_converts_tree_and_writes_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

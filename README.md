@@ -91,6 +91,7 @@ FastAPI Server (server.py)
 - **Artifact cleanup** — Large generated Markdown artifacts are stored under the OS temp directory and expire automatically.
 - **50MB limit** — Enforced both client-side (pre-upload check) and server-side (post-read check).
 - **Local-only by default** — Launchers bind to `127.0.0.1` and use a fixed app port.
+- **No stale frontend** — `/` and `/static/*` are served with `Cache-Control: no-cache` so browsers revalidate after every code update instead of executing days-old JavaScript.
 - **Hot reload opt-in** — Set `APP_RELOAD=1` before running `python server.py`.
 
 ---
@@ -132,12 +133,19 @@ Open **http://127.0.0.1:8000** in your browser. Use `stop.bat` to close the back
 
 The Bulk tab is for converting many files without repeating the single-file upload flow:
 
-1. Select files or a folder.
+1. Select files or a folder — or drag a folder straight onto the drop zone (dropped folders are traversed recursively, subfolders included).
 2. Click **Bulk Convert**.
-3. Review per-file converted, skipped, and failed results.
-4. Download the generated ZIP.
+3. Watch live progress (`Converting files... 12/48` plus the current file).
+4. Review per-file converted, skipped, and failed results.
+5. Download the generated ZIP.
 
 The ZIP contains one Markdown file per successful source file plus `batch-results.json`. Partial failures do not discard successful conversions.
+
+Robustness behavior:
+
+- Unreadable selections (a file deleted or moved after picking it) are skipped before upload with a toast naming the item, instead of killing the whole batch with a network error.
+- Bulk batches run on their own conversion lane, so single-file conversions stay responsive while a long batch runs.
+- If the server restarts while the tab is open, the page re-reads its session token and retries automatically — no manual refresh required.
 
 ---
 

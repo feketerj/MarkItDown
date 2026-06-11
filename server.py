@@ -113,6 +113,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def revalidate_frontend_assets(request: Request, call_next):
+    """Force browsers to revalidate the SPA and its assets on every load.
+
+    Without this, Chrome's heuristic caching can keep executing a stale
+    app.js for days after the code on disk has changed.
+    """
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # MarkItDown engine — singleton
 md_engine = MarkItDown()
 
@@ -149,6 +162,9 @@ MAX_FILE_SIZE = 50 * 1024 * 1024
 MAX_REQUEST_SIZE = MAX_FILE_SIZE + (1024 * 1024)
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 conversion_semaphore = asyncio.Semaphore(CONVERSION_CONCURRENCY)
+# Bulk batches run on their own lane with their own engine instances so a long
+# batch never starves single-file conversions waiting on conversion_semaphore.
+bulk_semaphore = asyncio.Semaphore(max(1, int(os.getenv("BULK_CONCURRENCY", "1"))))
 bulk_jobs: dict[str, dict] = {}
 RECENT_FAILURES: list[dict] = []
 
@@ -398,6 +414,7 @@ def public_bulk_job_state(job: dict) -> dict:
         "updated_at": job["updated_at"],
         "summary": job.get("summary"),
         "error": job.get("error"),
+        "progress": job.get("progress"),
     }
     if job.get("status") == "completed":
         state["download_id"] = job["id"]
@@ -434,18 +451,27 @@ async def run_bulk_conversion_job(job_id: str) -> None:
 
     job["status"] = "running"
     job["updated_at"] = time.time()
+
+    def report_progress(done: int, total: int, current: str | None) -> None:
+        job["progress"] = {"done": done, "total": total, "current": current}
+        job["updated_at"] = time.time()
+
     try:
-        summary = await run_converter(
-            run_batch,
-            Path(job["input_dir"]),
-            Path(job["output_dir"]),
-            engine=job["engine"],
-            overwrite=True,
-            max_file_size=MAX_FILE_SIZE,
-            md_engine=md_engine,
-            mineru_client=mineru_client,
-            spreadsheet_options=SPREADSHEET_OPTIONS,
-        )
+        async with bulk_semaphore:
+            # md_engine/mineru_client are intentionally None: run_batch builds
+            # its own instances so the shared single-file engines stay free.
+            summary = await run_in_threadpool(
+                run_batch,
+                Path(job["input_dir"]),
+                Path(job["output_dir"]),
+                engine=job["engine"],
+                overwrite=True,
+                max_file_size=MAX_FILE_SIZE,
+                md_engine=None,
+                mineru_client=None,
+                spreadsheet_options=SPREADSHEET_OPTIONS,
+                progress_callback=report_progress,
+            )
         create_bulk_zip(Path(job["output_dir"]), Path(job["zip_path"]))
         job["summary"] = summary.to_dict()
         job["status"] = "completed"

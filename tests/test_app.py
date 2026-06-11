@@ -16,6 +16,7 @@ os.environ.setdefault("APP_PORT", "8765")
 os.environ.setdefault("APP_RELOAD", "0")
 os.environ.setdefault("APP_TOKEN", "test-local-token")
 
+import batch_convert
 import server
 
 
@@ -246,7 +247,7 @@ class ServerBehaviorTests(unittest.TestCase):
         self.assertIn("engine exploded", diagnostics["recent_failures"][0]["message"])
 
     def test_bulk_conversion_returns_manifest_and_authenticated_zip(self):
-        original_engine = server.md_engine
+        original_builder = batch_convert._build_markitdown
         original_bulk_dir = server.BULK_ARTIFACT_DIR
         original_jobs = server.bulk_jobs
 
@@ -258,7 +259,9 @@ class ServerBehaviorTests(unittest.TestCase):
                 return SimpleNamespace(text_content=f"converted:{source.name}")
 
         with tempfile.TemporaryDirectory() as tmp:
-            server.md_engine = BulkEngine()
+            # Bulk jobs build their own engine via batch_convert so long
+            # batches never hold the single-file conversion lane.
+            batch_convert._build_markitdown = BulkEngine
             server.BULK_ARTIFACT_DIR = Path(tmp) / "bulk"
             server.bulk_jobs = {}
             try:
@@ -282,6 +285,7 @@ class ServerBehaviorTests(unittest.TestCase):
                 self.assertEqual(job["summary"]["converted"], 1)
                 self.assertEqual(job["summary"]["failed"], 1)
                 self.assertIn("download_url", job)
+                self.assertEqual(job["progress"], {"done": 2, "total": 2, "current": None})
 
                 unauthenticated_download = self.client.get(job["download_url"])
                 self.assertEqual(unauthenticated_download.status_code, 403)
@@ -297,7 +301,7 @@ class ServerBehaviorTests(unittest.TestCase):
                     self.assertFalse(report["success"])
                     self.assertEqual(report["failed"], 1)
             finally:
-                server.md_engine = original_engine
+                batch_convert._build_markitdown = original_builder
                 server.BULK_ARTIFACT_DIR = original_bulk_dir
                 server.bulk_jobs = original_jobs
 
@@ -399,6 +403,22 @@ class FrontendGuardTests(unittest.TestCase):
         self.assertIn("downloadBulkZip", app_js)
         self.assertIn("paths", app_js)
         self.assertIn(".bulk-result-list", style_css)
+
+    def test_frontend_survives_folder_drops_and_server_restarts(self):
+        app_js = Path("static/js/app.js").read_text(encoding="utf-8")
+
+        # Dropped folders must be traversed, not uploaded as pseudo-files.
+        self.assertIn("webkitGetAsEntry", app_js)
+        self.assertIn("collectDroppedItems", app_js)
+        self.assertIn("walkDroppedEntry", app_js)
+        # Unreadable selections are caught before upload, with a clear message.
+        self.assertIn("isFileReadable", app_js)
+        # A restarted server mints a new token; the page must re-read and retry.
+        self.assertIn("refreshApiToken", app_js)
+        self.assertIn("apiFetch", app_js)
+        # Long batches show live per-file progress instead of a static spinner.
+        self.assertIn("progress.done", app_js)
+        self.assertIn("progress.total", app_js)
 
 
 class LauncherGuardTests(unittest.TestCase):
