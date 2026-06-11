@@ -32,6 +32,8 @@ mdcreator_*
 .server.pid
 .server.log
 .server.err.log
+.doctor.json
+.doctor.err.log
 .start.lock/
 
 # Environment
