@@ -1,6 +1,6 @@
 # MarkItDown — Universal Markdown Converter
 
-A premium web application that converts **any file** to clean Markdown. Powered by [Microsoft MarkItDown](https://github.com/microsoft/markitdown).
+A premium web application that converts supported document, web, data, image, archive, audio, and text formats to clean Markdown. Powered by [Microsoft MarkItDown](https://github.com/microsoft/markitdown).
 
 ![Python](https://img.shields.io/badge/Python-3.12+-blue?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
@@ -10,7 +10,21 @@ A premium web application that converts **any file** to clean Markdown. Powered 
 
 ## What It Does
 
-Drop any file into the web UI and get clean, structured Markdown back in seconds. The conversion engine is Microsoft's MarkItDown library — the most popular file-to-Markdown converter on GitHub (119k+ stars).
+Drop a supported file into the web UI and get clean, structured Markdown back in seconds.
+
+## Doctrine that binds here
+| Layer | Doc | Applies |
+|---|---|---|
+| Estate | `~/HAF/DCOM/REPORTING-INSTRUCTIONS.md` — the one door (→ PAD · SOD · ROE · canon) | always |
+| Estate | `~/HAF/DCOM/docs/sop/SESSION-CONTINUITY-SOP.md` — threads disposable, disk is the record | always |
+| Build | TPFDD/DSOE + `PROCESS-CHECKLIST.md` (tier · mode · gates · review dial) | when building |
+| Local | `./docs/DECISION-LOG.md` — Rulings | this workspace only |
+
+Pointers only — if this table disagrees with a doc, the doc wins.
+
+---
+
+VoiceThread caption formats (`.dfxp`, `.ttml`, `.srt`, `.vtt`) are not handled by the generic MarkItDown route. The LDR-602A collector owns caption download, student/item/asset binding, SHA-256 verification, and caption-to-Markdown normalization. MarkItDown must not be used as a substitute for that identity binding.
 
 For multiple files, use the Bulk tab in the web UI, `batch.bat`, or `batch_convert.py`. Bulk mode writes one `.md` file per input file, preserves browser-provided folder paths, records results in `batch-results.json`, and packages the outputs as a ZIP.
 
@@ -113,11 +127,11 @@ pip install -r requirements.txt
 
 ### Run
 
-```bat
-start.bat
+```bash
+./start.sh
 ```
 
-Open **http://127.0.0.1:8000** in your browser. Use `stop.bat` to close the background server.
+Open **http://127.0.0.1:8000** in your browser. Use `./stop.sh` to close the background server.
 
 ### Usage
 
@@ -153,11 +167,11 @@ Robustness behavior:
 
 For demo prep or troubleshooting, generate a small redacted failure packet:
 
-```powershell
-python tools/doctor.py
+```bash
+.venv/bin/python tools/doctor.py
 ```
 
-`start.bat` runs this same doctor automatically after dependency setup and before launching the server. It writes `.doctor.json` and blocks startup only when diagnostics returns a hard failure. To skip that preflight intentionally:
+`start.sh` runs this same doctor automatically after dependency setup and before launching the server. It writes `.doctor.json` and blocks startup only when diagnostics returns a hard failure. Run the regression suite with `.venv/bin/python -m unittest discover -s tests -v`.
 
 ```powershell
 $env:MD_CREATOR_SKIP_DOCTOR = "1"
