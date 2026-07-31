@@ -1,6 +1,9 @@
 # MarkItDown — Universal Markdown Converter
 
-A premium web application that converts supported document, web, data, image, archive, audio, and text formats to clean Markdown. Powered by [Microsoft MarkItDown](https://github.com/microsoft/markitdown).
+OutPace's maintained converter and pipeline-distillation application for turning
+supported document, web, data, image, archive, audio, and text formats into
+clean Markdown. This repository—not an upstream repository—is the OPICS
+integration and control surface.
 
 ![Python](https://img.shields.io/badge/Python-3.12+-blue?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
@@ -226,6 +229,67 @@ Safety behavior:
 - Files over the configured size limit are reported as errors and are not converted.
 - Spreadsheet files use the same streaming converter as the web app and write Markdown directly to the output path.
 
+## OPICS Pipeline Distillation
+
+`pipeline_distill.py` is the shared extraction boundary for pipeline-owned
+manuals, brochures, drawings, Office files, spreadsheets, and other public
+source documents. It does not infer domain fields or promote database rows.
+
+It produces:
+
+- immutable Markdown keyed by source, parser/runtime interpretation, and output
+  hashes;
+- a positioned DeepDoc OCR sidecar for PDFs when the isolated TDP OCR runtime is
+  available;
+- a JSON receipt with the public source identifier, source/output SHA-256,
+  parser identity, model/shim hashes, warnings, and retention disposition.
+
+The generic converter runs outside the orchestrator process behind a bounded
+two-lane drum. It enforces archive expansion/nesting, Markdown output, wall
+time, process-group memory, CPU, file-size, and file-descriptor limits. Generic
+non-PDF output is labeled `parser_output_only`; only a parser with demonstrated
+coverage can claim the full document.
+
+Example:
+
+```bash
+.venv/bin/python pipeline_distill.py \
+  /tmp/opics-intake/manual.pdf \
+  /var/tmp/opics-distilled \
+  --source-uri https://manufacturer.example/manual.pdf \
+  --owned-root /tmp/opics-intake \
+  --parser auto \
+  --json
+```
+
+`--owned-root` is a custody boundary, not deletion authority. The input must be
+a regular, non-symlink file beneath that exact root and artifacts must land
+outside the root. After the initial receipt lands, the source moves atomically
+into a private recoverable quarantine. Omit the option for caller-owned
+documents, source-of-record caches, TDP proof packages, and other evidence that
+must remain.
+
+Raw deletion is a separate action. The consuming pipeline must first provide a
+durable, non-symlink downstream evidence artifact proving either schema
+extraction is complete or the source is terminally non-applicable. The
+authorization writer computes that artifact's hash itself. `pipeline_reap.py`
+then reopens and revalidates the downstream artifact, immutable receipt,
+normalized artifact, authorization, quarantine identity, raw hash, and minimum
+age before deletion. A distillation receipt or caller-supplied hash alone never
+authorizes deletion.
+
+Parser truth:
+
+- OutPace MarkItDown handles ordinary text-bearing and Office/data formats.
+- The locally proven RAGFlow DeepDoc component supplies OCR text, confidence,
+  and positioned boxes for PDFs. It is labeled `deepdoc-ocr`.
+- Full RAGFlow document parsing and table-structure recognition are not claimed;
+  the local table recognizer is not yet verified.
+- A source-located distilled receipt is eligible for a schema-bound extraction
+  attempt. It never authorizes a complete-row promotion. Each consuming
+  pipeline still owns field applicability, source-quote/page anchors,
+  terminal-null decisions, promotion, and cleanup authorization.
+
 ---
 
 ## Project Structure
@@ -345,7 +409,7 @@ Downloads the completed bulk ZIP artifact. Requires the same `X-MD-Creator-Token
 |:------|:-----------|:--------|
 | **Backend** | [FastAPI](https://fastapi.tiangolo.com/) | Async web framework |
 | **Server** | [Uvicorn](https://www.uvicorn.org/) | ASGI server |
-| **Engine** | [MarkItDown](https://github.com/microsoft/markitdown) | File → Markdown conversion |
+| **Engine** | [OutPace MarkItDown](https://github.com/feketerj/MarkItDown) | Governed file → Markdown conversion and receipts |
 | **Frontend** | Vanilla HTML/CSS/JS | Zero-dependency UI |
 | **Preview** | [markdown-it](https://github.com/markdown-it/markdown-it) | Markdown → HTML rendering |
 | **Fonts** | [Inter](https://rsms.me/inter/) + [JetBrains Mono](https://www.jetbrains.com/lp/mono/) | Typography |

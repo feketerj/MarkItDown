@@ -35,6 +35,7 @@ mdcreator_*
 .doctor.json
 .doctor.err.log
 .start.lock/
+graphify-out/
 
 # Environment
 .env
