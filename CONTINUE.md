@@ -16,6 +16,14 @@ DeepDoc runtime is consumed in place as an OCR/position instrument.
 page 1 and the full three-page path produced 6,419 Markdown characters and 986
 positioned boxes with exact source/model/shim hashes.
 
+Clean-commit production proof (`be99cb5fd77b2f190ea11fffe39f4a431ddcb4fa`):
+MS51932 source `6d96c32f0490e24a5daab047f63b029cd67ef358aeb8ac85db6ad410dd09cc35`
+produced full-document DeepDoc OCR across 3/3 pages, Markdown
+`628d15333a0333c75802ef147405196ce4f553fc3f3a9433c0d3d295000e38f9`
+(6,419 chars), and layout
+`be0a0c4b4f1561c089f542f48942e41913e8d22bf7c74447005f16f9ade8fd0f`.
+Receipt truth: `owner_worktree_state=clean` and `owner_commit` equals HEAD.
+
 ## Next (in order)
 1. Wire `machine-specs/scripts/crawl.py` to `pipeline_distill.py` for admitted
    completion work, preserving its existing domain extractor and provenance.
