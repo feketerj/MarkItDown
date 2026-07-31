@@ -171,16 +171,36 @@ def distill_file(
                         raise DistillationError(message) from exc
                     warnings.append(message)
 
-        if not markdown_text.strip() and layout_payload is not None:
-            markdown_text = _markdown_from_deepdoc(layout_payload, source_path.name)
-            parser_used = "deepdoc-ocr"
-            warning = "MarkItDown returned no usable text; DeepDoc OCR supplied Markdown"
-            if markitdown_error:
-                warning = (
-                    f"MarkItDown failed ({markitdown_error}); "
-                    "DeepDoc OCR supplied Markdown"
-                )
-            warnings.append(warning)
+        if quality_requires_ocr and layout_payload is not None:
+            ocr_markdown = _markdown_from_deepdoc(
+                layout_payload,
+                source_path.name,
+            )
+            if ocr_markdown:
+                if markdown_text.strip():
+                    markdown_text = (
+                        markdown_text.rstrip()
+                        + "\n\n# DeepDoc OCR recovery\n\n"
+                        + ocr_markdown
+                    )
+                    parser_used = "outpace-markitdown+deepdoc-ocr"
+                    warnings.append(
+                        "MarkItDown output was below the quality threshold; "
+                        "DeepDoc OCR was appended to the final Markdown"
+                    )
+                else:
+                    markdown_text = ocr_markdown
+                    parser_used = "deepdoc-ocr"
+                    warning = (
+                        "MarkItDown returned no usable text; "
+                        "DeepDoc OCR supplied Markdown"
+                    )
+                    if markitdown_error:
+                        warning = (
+                            f"MarkItDown failed ({markitdown_error}); "
+                            "DeepDoc OCR supplied Markdown"
+                        )
+                    warnings.append(warning)
         elif markitdown_error:
             raise DistillationError(f"MarkItDown conversion failed: {markitdown_error}")
 
@@ -213,11 +233,23 @@ def distill_file(
             _publish_immutable(staged_layout, layout_path, layout_sha256)
 
         source_locator_present = bool(source_uri and source_uri.strip())
+        # Extraction readiness belongs to the FINAL Markdown artifact, not the
+        # pre-OCR MarkItDown attempt that selected the fallback. A successful
+        # DeepDoc recovery must be allowed to earn readiness; a still-sparse
+        # OCR result must remain explicitly ineligible.
+        final_quality_insufficient, final_quality_reason = _needs_deepdoc(
+            markdown_text,
+            None,
+        )
+        if final_quality_insufficient:
+            warnings.append(
+                f"Final Markdown is not extraction-ready: {final_quality_reason}"
+            )
         coverage = _coverage(
             parser_used,
             layout_payload,
             is_pdf=is_pdf,
-            text_quality_sufficient=not quality_requires_ocr,
+            text_quality_sufficient=not final_quality_insufficient,
         )
         cleanup = {
             "retention_policy": (
@@ -1026,15 +1058,23 @@ def _build_receipt(
             "retrieval_chain_supplied": False,
         },
         "coverage": coverage,
-        "eligible_for_schema_extraction_attempt": source_locator_present,
+        "eligible_for_schema_extraction_attempt": (
+            source_locator_present
+            and coverage["text_quality_sufficient_for_extraction_attempt"]
+        ),
         "document_scope_complete": coverage["content_scope"] == "full_document",
         "eligible_for_complete_row_promotion": False,
         "promotion_authority": "consuming_pipeline_only",
         "next_gate": (
             "schema-bound field extraction with source quote/page provenance"
-            if source_locator_present
+            if (
+                source_locator_present
+                and coverage["text_quality_sufficient_for_extraction_attempt"]
+            )
             else (
                 "supply a durable source URI before field extraction"
+                if not source_locator_present
+                else "improve document text quality before field extraction"
             )
         ),
         "cleanup": cleanup,

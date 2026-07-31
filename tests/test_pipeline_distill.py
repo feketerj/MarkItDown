@@ -22,6 +22,10 @@ class StubMarkItDown:
 
 def stub_layout(source, target):
     source_hash = hashlib.sha256(Path(source).read_bytes()).hexdigest()
+    ocr_text = (
+        "OCR manual specification spindle speed 8100 rpm and working range "
+        "500 mm with manufacturer model identification. "
+    ) * 4
     payload = {
         "schema_version": "opics.deepdoc-ocr.v1",
         "parser": "deepdoc-ocr",
@@ -33,10 +37,10 @@ def stub_layout(source, target):
         "pages": [
             {
                 "page": 1,
-                "ocr_text": "OCR manual text",
+                "ocr_text": ocr_text,
                 "boxes": [
                     {
-                        "text": "OCR manual text",
+                        "text": ocr_text,
                         "confidence": 0.99,
                         "x0": 0.1,
                         "x1": 0.5,
@@ -263,7 +267,7 @@ class PipelineDistillTests(unittest.TestCase):
                 layout_runner=split_layout,
             )
             markdown = Path(result.markdown_path).read_text(encoding="utf-8")
-            self.assertIn("OCR manual text", markdown)
+            self.assertIn("OCR manual specification", markdown)
             self.assertNotIn("RETURNED BUT NOT RECEIPTED", markdown)
 
     def test_wrong_layout_source_hash_fails_closed(self):
@@ -305,8 +309,40 @@ class PipelineDistillTests(unittest.TestCase):
             self.assertEqual(result.parser_used, "deepdoc-ocr")
             markdown = Path(result.markdown_path).read_text(encoding="utf-8")
             self.assertIn("## Page 1", markdown)
-            self.assertIn("OCR manual text", markdown)
+            self.assertIn("OCR manual specification", markdown)
             self.assertIn("DeepDoc OCR supplied Markdown", result.warnings[0])
+
+    def test_sparse_final_ocr_is_not_extraction_eligible(self):
+        def sparse_layout(source, target):
+            payload = stub_layout(source, target)
+            payload["pages"][0]["ocr_text"] = "OCR fragment"
+            payload["pages"][0]["boxes"][0]["text"] = "OCR fragment"
+            target.write_text(json.dumps(payload), encoding="utf-8")
+            return payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "scan.pdf"
+            source.write_bytes(b"scan")
+            result = pipeline_distill.distill_file(
+                source,
+                root / "artifacts",
+                source_uri="https://oem.example/scan.pdf",
+                parser="auto",
+                markitdown_engine=StubMarkItDown(text=""),
+                layout_runner=sparse_layout,
+            )
+            receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
+            self.assertFalse(
+                receipt["coverage"][
+                    "text_quality_sufficient_for_extraction_attempt"
+                ]
+            )
+            self.assertFalse(receipt["eligible_for_schema_extraction_attempt"])
+            self.assertIn(
+                "improve document text quality",
+                receipt["next_gate"],
+            )
 
     def test_partial_deepdoc_fallback_is_not_schema_extraction_eligible(self):
         def partial_layout(source, target):
